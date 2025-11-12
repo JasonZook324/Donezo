@@ -11,6 +11,7 @@ public class DashboardPage : ContentPage
     private int? _userId;
     private Picker _listsPicker = null!;
     private Entry _newListEntry = null!;
+    private CheckBox _dailyCheck = null!;
     private Button _createListButton = null!;
     private Button _deleteListButton = null!;
     private Button _resetListButton = null!;
@@ -19,8 +20,11 @@ public class DashboardPage : ContentPage
     private Button _addItemButton = null!;
 
     private readonly ObservableCollection<ItemRecord> _items = new();
+    private IReadOnlyList<ListRecord> _lists = Array.Empty<ListRecord>();
+
     private readonly Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8,2), IsVisible = false, FontAttributes = FontAttributes.Bold };
 
+    private bool _suppressDailyEvent;
     private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
 
     public DashboardPage(INeonDbService db, string username)
@@ -68,9 +72,17 @@ public class DashboardPage : ContentPage
     {
         _listsPicker = new Picker { Title = "Select List" };
         _listsPicker.ItemDisplayBinding = new Binding("Name");
-        _listsPicker.SelectedIndexChanged += async (_, _) => await RefreshItemsAsync();
+        _listsPicker.SelectedIndexChanged += async (_, _) =>
+        {
+            await RefreshItemsAsync();
+            SyncDailyCheckboxWithSelectedList();
+        };
 
         _newListEntry = new Entry { Placeholder = "New list name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
+        _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
+        _dailyCheck.CheckedChanged += async (s, e) => await OnDailyToggledAsync(e.Value);
+        var dailyRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Daily" }, _dailyCheck } };
+
         _createListButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         _createListButton.Clicked += async (_, _) => await CreateListAsync();
 
@@ -166,6 +178,7 @@ public class DashboardPage : ContentPage
                 {
                     listsHeader,
                     _listsPicker,
+                    dailyRow,
                     new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton, _resetListButton } }
                 }
             }
@@ -223,9 +236,46 @@ public class DashboardPage : ContentPage
     private async Task RefreshListsAsync()
     {
         if (_userId == null) return;
-        var lists = await _db.GetListsAsync(_userId.Value);
-        _listsPicker.ItemsSource = lists.Count == 0 ? new List<ListRecord>() : lists.ToList();
-        _listsPicker.SelectedIndex = lists.Count > 0 ? 0 : -1;
+        _lists = await _db.GetListsAsync(_userId.Value);
+        _listsPicker.ItemsSource = _lists.Count == 0 ? new List<ListRecord>() : _lists.ToList();
+        _listsPicker.SelectedIndex = _lists.Count > 0 ? 0 : -1;
+        SyncDailyCheckboxWithSelectedList();
+    }
+
+    private void SyncDailyCheckboxWithSelectedList()
+    {
+        var id = SelectedListId;
+        _suppressDailyEvent = true;
+        if (id == null)
+        {
+            _dailyCheck.IsChecked = false;
+        }
+        else
+        {
+            var lr = _lists.FirstOrDefault(x => x.Id == id);
+            _dailyCheck.IsChecked = lr?.IsDaily ?? false;
+        }
+        _suppressDailyEvent = false;
+    }
+
+    private async Task OnDailyToggledAsync(bool isChecked)
+    {
+        if (_suppressDailyEvent) return;
+        var id = SelectedListId;
+        if (id == null) return; // not tied to a list yet
+        await _db.SetListDailyAsync(id.Value, isChecked);
+        // Optionally update local cache so the value stays in sync without full refresh
+        var lr = _lists.FirstOrDefault(x => x.Id == id.Value);
+        if (lr != null)
+        {
+            var m = _lists.ToList();
+            var idx = m.FindIndex(x => x.Id == id.Value);
+            if (idx >= 0)
+            {
+                m[idx] = new ListRecord(lr.Id, lr.Name, isChecked);
+                _lists = m;
+            }
+        }
     }
 
     private async Task CreateListAsync()
@@ -233,8 +283,9 @@ public class DashboardPage : ContentPage
         if (_userId == null) return;
         var name = _newListEntry.Text?.Trim();
         if (string.IsNullOrWhiteSpace(name)) return;
-        await _db.CreateListAsync(_userId.Value, name);
+        await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked);
         _newListEntry.Text = string.Empty;
+        _dailyCheck.IsChecked = false;
         await RefreshListsAsync();
     }
 

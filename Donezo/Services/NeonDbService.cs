@@ -12,16 +12,17 @@ public interface INeonDbService
     Task<bool> AuthenticateUserAsync(string username, string password, CancellationToken ct = default);
     Task<int?> GetUserIdAsync(string username, CancellationToken ct = default);
     Task<IReadOnlyList<ListRecord>> GetListsAsync(int userId, CancellationToken ct = default);
-    Task<int> CreateListAsync(int userId, string name, CancellationToken ct = default);
+    Task<int> CreateListAsync(int userId, string name, bool isDaily, CancellationToken ct = default);
     Task<IReadOnlyList<ItemRecord>> GetItemsAsync(int listId, CancellationToken ct = default);
     Task<int> AddItemAsync(int listId, string name, CancellationToken ct = default);
     Task<bool> SetItemCompletedAsync(int itemId, bool completed, CancellationToken ct = default);
     Task<bool> DeleteItemAsync(int itemId, CancellationToken ct = default);
     Task<bool> DeleteListAsync(int listId, CancellationToken ct = default);
     Task<int> ResetListAsync(int listId, CancellationToken ct = default);
+    Task<bool> SetListDailyAsync(int listId, bool isDaily, CancellationToken ct = default);
 }
 
-public record ListRecord(int Id, string Name);
+public record ListRecord(int Id, string Name, bool IsDaily);
 public record ItemRecord(int Id, string Name, bool IsCompleted);
 
 public class NeonDbService : INeonDbService
@@ -40,15 +41,11 @@ public class NeonDbService : INeonDbService
         _logger = logger;
 
         var raw =
-            // 1. OS environment variable (desktop scenarios)
             Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING")
-            // 2. SecureStorage (mobile/device scenarios)
             ?? TryGetFromSecureStorage()
 #if DEBUG
-            // 3. Debug-only fallback constant (for quick local testing)
             ?? DebugFallbackConnectionString
 #endif
-            // 4. Fail if nothing available
             ?? throw new InvalidOperationException("Neon connection string not found. Set env var, store via SecureStorage, or (DEBUG) fallback.");
 
         _connectionString = NormalizeConnectionString(raw);
@@ -63,13 +60,10 @@ public class NeonDbService : INeonDbService
         if (cs.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
             cs.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
         {
-            if (!Uri.TryCreate(cs, UriKind.Absolute, out var uri))
-                return cs; // fallback
-
+            if (!Uri.TryCreate(cs, UriKind.Absolute, out var uri)) return cs;
             var userInfo = uri.UserInfo.Split(':', 2);
             var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "";
             var pass = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
-
             var db = uri.AbsolutePath.TrimStart('/');
             var b = new NpgsqlConnectionStringBuilder
             {
@@ -81,7 +75,6 @@ public class NeonDbService : INeonDbService
                 SslMode = SslMode.Require,
                 TrustServerCertificate = true
             };
-
             // Parse query params; ignore channel_binding, map sslmode
             if (!string.IsNullOrWhiteSpace(uri.Query))
             {
@@ -90,7 +83,6 @@ public class NeonDbService : INeonDbService
                     var kv = pair.Split('=', 2);
                     var key = kv[0].ToLowerInvariant();
                     var val = kv.Length > 1 ? kv[1] : "";
-
                     switch (key)
                     {
                         case "sslmode":
@@ -102,21 +94,12 @@ public class NeonDbService : INeonDbService
                     }
                 }
             }
-
             return b.ConnectionString;
         }
 
         // key=value form: strip channel binding entries before using the builder
         var sanitized = StripKeyValue(cs, ["channel_binding", "Channel Binding Mode"]);
-        try
-        {
-            var b = new NpgsqlConnectionStringBuilder(sanitized);
-            return b.ConnectionString;
-        }
-        catch
-        {
-            return sanitized;
-        }
+        try { return new NpgsqlConnectionStringBuilder(sanitized).ConnectionString; } catch { return sanitized; }
     }
 
     private static string StripKeyValue(string cs, string[] keys)
@@ -128,14 +111,8 @@ public class NeonDbService : INeonDbService
 
     private async Task InitializeInBackground()
     {
-        try
-        {
-            await EnsureSchemaAsync(CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Schema init failed");
-        }
+        try { await EnsureSchemaAsync(CancellationToken.None); }
+        catch (Exception ex) { _logger?.LogError(ex, "Schema init failed"); }
     }
 
     public async Task<string> PingAsync(CancellationToken ct = default)
@@ -150,25 +127,12 @@ public class NeonDbService : INeonDbService
         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password) || password.Length < 6) return false;
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-
-        // Check if user exists
-        await using (var check = new NpgsqlCommand("select 1 from users where username=@u", conn))
-        {
-            check.Parameters.AddWithValue("u", username);
-            if (await check.ExecuteScalarAsync(ct) != null) return false;
-        }
-
+        await using (var check = new NpgsqlCommand("select 1 from users where username=@u", conn)) { check.Parameters.AddWithValue("u", username); if (await check.ExecuteScalarAsync(ct) != null) return false; }
         // Hash password
         var salt = GenerateSalt(16);
         var hash = HashPassword(password, salt, 100_000);
-
         await using (var ins = new NpgsqlCommand("insert into users(username,password_hash,password_salt) values(@u,@h,@s)", conn))
-        {
-            ins.Parameters.AddWithValue("u", username);
-            ins.Parameters.AddWithValue("h", hash);
-            ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt));
-            await ins.ExecuteNonQueryAsync(ct);
-        }
+        { ins.Parameters.AddWithValue("u", username); ins.Parameters.AddWithValue("h", hash); ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt)); await ins.ExecuteNonQueryAsync(ct); }
         _logger?.LogInformation("Registered user {Username}", username);
         return true;
     }
@@ -178,7 +142,6 @@ public class NeonDbService : INeonDbService
         if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password)) return false;
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-
         await using var cmd = new NpgsqlCommand("select password_hash,password_salt from users where username=@u", conn); cmd.Parameters.AddWithValue("u", username);
         await using var reader = await cmd.ExecuteReaderAsync(ct); if (!await reader.ReadAsync(ct)) return false;
         var storedHash = reader.GetString(0); var salt = Convert.FromBase64String(reader.GetString(1));
@@ -200,24 +163,49 @@ public class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         var list = new List<ListRecord>();
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("select id,name from lists where user_id=@u order by id", conn); cmd.Parameters.AddWithValue("u", userId);
-        await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) list.Add(new ListRecord(r.GetInt32(0), r.GetString(1))); return list;
+        await using var cmd = new NpgsqlCommand("select id,name,is_daily from lists where user_id=@u order by id", conn); cmd.Parameters.AddWithValue("u", userId);
+        await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) list.Add(new ListRecord(r.GetInt32(0), r.GetString(1), r.GetBoolean(2))); return list;
     }
 
-    public async Task<int> CreateListAsync(int userId, string name, CancellationToken ct = default)
+    public async Task<int> CreateListAsync(int userId, string name, bool isDaily, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("List name required", nameof(name));
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("insert into lists(user_id,name) values(@u,@n) returning id", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("n", name);
+        await using var cmd = new NpgsqlCommand("insert into lists(user_id,name,is_daily,last_reset_date) values(@u,@n,@d,current_date) returning id", conn);
+        cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("n", name); cmd.Parameters.AddWithValue("d", isDaily);
         var id = (int)await cmd.ExecuteScalarAsync(ct); return id;
     }
 
     public async Task<IReadOnlyList<ItemRecord>> GetItemsAsync(int listId, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct);
-        var items = new List<ItemRecord>();
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+
+        // Daily reset check using DB current_date
+        await using (var chk = new NpgsqlCommand("select is_daily, last_reset_date, current_date from lists where id=@l", conn))
+        {
+            chk.Parameters.AddWithValue("l", listId);
+            await using var rr = await chk.ExecuteReaderAsync(ct);
+            if (await rr.ReadAsync(ct))
+            {
+                var isDaily = rr.GetBoolean(0);
+                var lastReset = rr.IsDBNull(1) ? (DateOnly?)null : DateOnly.FromDateTime(rr.GetDateTime(1));
+                var today = DateOnly.FromDateTime(rr.GetDateTime(2));
+                if (isDaily && (lastReset == null || lastReset.Value < today))
+                {
+                    await rr.DisposeAsync();
+                    await using var tx = await conn.BeginTransactionAsync(ct);
+                    await using (var u1 = new NpgsqlCommand("update items set is_completed=false where list_id=@l", conn, tx))
+                    { u1.Parameters.AddWithValue("l", listId); await u1.ExecuteNonQueryAsync(ct); }
+                    await using (var u2 = new NpgsqlCommand("update lists set last_reset_date=current_date where id=@l", conn, tx))
+                    { u2.Parameters.AddWithValue("l", listId); await u2.ExecuteNonQueryAsync(ct); }
+                    await tx.CommitAsync(ct);
+                }
+            }
+        }
+
+        var items = new List<ItemRecord>();
         await using var cmd = new NpgsqlCommand("select id,name,is_completed from items where list_id=@l order by id", conn); cmd.Parameters.AddWithValue("l", listId);
         await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) items.Add(new ItemRecord(r.GetInt32(0), r.GetString(1), r.GetBoolean(2))); return items;
     }
@@ -259,8 +247,25 @@ public class NeonDbService : INeonDbService
     {
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("update items set is_completed=false where list_id=@l", conn); cmd.Parameters.AddWithValue("l", listId);
-        return await cmd.ExecuteNonQueryAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        int affected;
+        await using (var cmd = new NpgsqlCommand("update items set is_completed=false where list_id=@l", conn, tx))
+        { cmd.Parameters.AddWithValue("l", listId); affected = await cmd.ExecuteNonQueryAsync(ct); }
+        await using (var cmd2 = new NpgsqlCommand("update lists set last_reset_date=current_date where id=@l", conn, tx))
+        { cmd2.Parameters.AddWithValue("l", listId); await cmd2.ExecuteNonQueryAsync(ct); }
+        await tx.CommitAsync(ct);
+        return affected;
+    }
+
+    public async Task<bool> SetListDailyAsync(int listId, bool isDaily, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("update lists set is_daily=@d, last_reset_date=case when @d then current_date else last_reset_date end where id=@l", conn);
+        cmd.Parameters.AddWithValue("d", isDaily);
+        cmd.Parameters.AddWithValue("l", listId);
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        return rows == 1;
     }
 
     // Store a connection string securely at runtime (e.g. first launch in dev)
@@ -288,9 +293,12 @@ create table if not exists items (
  list_id int not null references lists(id) on delete cascade,
  name text not null,
  is_completed boolean not null default false,
- created_at timestamptz not null default now());";
+ created_at timestamptz not null default now());
+-- evolve schema
+alter table if exists lists add column if not exists is_daily boolean not null default false;
+alter table if exists lists add column if not exists last_reset_date date;";
         await using (var cmd = new NpgsqlCommand(sql, conn)) { await cmd.ExecuteNonQueryAsync(ct); }
-        _schemaEnsured = true; _logger?.LogInformation("Schema ensured (users, lists, items)");
+        _schemaEnsured = true; _logger?.LogInformation("Schema ensured (users, lists, items + daily)");
     }
 
     private static byte[] GenerateSalt(int size) { var salt = new byte[size]; RandomNumberGenerator.Fill(salt); return salt; }
