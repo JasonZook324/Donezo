@@ -18,6 +18,7 @@ public interface INeonDbService
     Task<bool> SetItemCompletedAsync(int itemId, bool completed, CancellationToken ct = default);
     Task<bool> DeleteItemAsync(int itemId, CancellationToken ct = default);
     Task<bool> DeleteListAsync(int listId, CancellationToken ct = default);
+    Task<int> ResetListAsync(int listId, CancellationToken ct = default);
 }
 
 public record ListRecord(int Id, string Name);
@@ -252,6 +253,14 @@ public class NeonDbService : INeonDbService
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand("delete from lists where id=@l", conn); cmd.Parameters.AddWithValue("l", listId);
         var rows = await cmd.ExecuteNonQueryAsync(ct); return rows == 1;
+    }
+
+    public async Task<int> ResetListAsync(int listId, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("update items set is_completed=false where list_id=@l", conn); cmd.Parameters.AddWithValue("l", listId);
+        return await cmd.ExecuteNonQueryAsync(ct);
     }
 
     // Store a connection string securely at runtime (e.g. first launch in dev)

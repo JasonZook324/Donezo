@@ -1,5 +1,6 @@
 using Microsoft.Maui.Controls;
 using Donezo.Services;
+using Microsoft.Maui.Storage;
 
 namespace Donezo.Pages;
 
@@ -66,6 +67,7 @@ public class LoginPage : ContentPage
 
     private async Task NavigateToDashboardAsync(string username)
     {
+        await SecureStorage.SetAsync("AUTH_USERNAME", username);
         await Shell.Current.Navigation.PushAsync(new DashboardPage(_db, username));
     }
 }

@@ -1,5 +1,6 @@
 using Donezo.Services;
 using System.Collections.ObjectModel;
+using Microsoft.Maui.Storage;
 
 namespace Donezo.Pages;
 
@@ -12,11 +13,13 @@ public class DashboardPage : ContentPage
     private Entry _newListEntry = null!;
     private Button _createListButton = null!;
     private Button _deleteListButton = null!;
+    private Button _resetListButton = null!;
     private CollectionView _itemsView = null!;
     private Entry _newItemEntry = null!;
     private Button _addItemButton = null!;
 
     private readonly ObservableCollection<ItemRecord> _items = new();
+    private readonly Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8,2), IsVisible = false, FontAttributes = FontAttributes.Bold };
 
     private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
 
@@ -74,6 +77,9 @@ public class DashboardPage : ContentPage
         _deleteListButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
         _deleteListButton.Clicked += async (_, _) => await DeleteCurrentListAsync();
 
+        _resetListButton = new Button { Text = "Reset", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _resetListButton.Clicked += async (_, _) => await ResetCurrentListAsync();
+
         _newItemEntry = new Entry { Placeholder = "New item name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _addItemButton = new Button { Text = "+ Add", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _addItemButton.Clicked += async (_, _) => await AddItemAsync();
@@ -106,6 +112,7 @@ public class DashboardPage : ContentPage
                     {
                         await _db.SetItemCompletedAsync(ir.Id, e.Value);
                         ir.IsCompleted = e.Value;
+                        UpdateCompletedBadge();
                     }
                 };
 
@@ -125,6 +132,7 @@ public class DashboardPage : ContentPage
                         if (await _db.DeleteItemAsync(ir.Id))
                         {
                             _items.Remove(ir);
+                            UpdateCompletedBadge();
                         }
                     }
                 };
@@ -137,6 +145,17 @@ public class DashboardPage : ContentPage
             })
         };
 
+        var listsHeader = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitionCollection
+            {
+                new ColumnDefinition(GridLength.Star),
+                new ColumnDefinition(GridLength.Auto)
+            }
+        };
+        listsHeader.Add(new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] });
+        listsHeader.Add(_completedBadge, 1, 0);
+
         var listsCard = new Frame
         {
             Style = (Style)Application.Current!.Resources["CardFrame"],
@@ -145,9 +164,9 @@ public class DashboardPage : ContentPage
                 Spacing = 12,
                 Children =
                 {
-                    new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] },
+                    listsHeader,
                     _listsPicker,
-                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton } }
+                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton, _resetListButton } }
                 }
             }
         };
@@ -229,17 +248,32 @@ public class DashboardPage : ContentPage
         {
             await RefreshListsAsync();
             _items.Clear();
+            UpdateCompletedBadge();
         }
+    }
+
+    private async Task ResetCurrentListAsync()
+    {
+        var id = SelectedListId;
+        if (id == null) return;
+        await _db.ResetListAsync(id.Value);
+        await RefreshItemsAsync();
+        UpdateCompletedBadge();
     }
 
     private async Task RefreshItemsAsync()
     {
         _items.Clear();
         var listId = SelectedListId;
-        if (listId == null) return;
+        if (listId == null)
+        {
+            UpdateCompletedBadge();
+            return;
+        }
         var items = await _db.GetItemsAsync(listId.Value);
         foreach (var i in items)
             _items.Add(new ItemRecord(i.Id, i.Name, i.IsCompleted));
+        UpdateCompletedBadge();
     }
 
     private async Task AddItemAsync()
@@ -251,6 +285,16 @@ public class DashboardPage : ContentPage
         await _db.AddItemAsync(listId.Value, name);
         _newItemEntry.Text = string.Empty;
         await RefreshItemsAsync();
+    }
+
+    private void UpdateCompletedBadge()
+    {
+        if (_items.Count == 0)
+        {
+            _completedBadge.IsVisible = false;
+            return;
+        }
+        _completedBadge.IsVisible = _items.All(i => i.IsCompleted);
     }
 }
 
