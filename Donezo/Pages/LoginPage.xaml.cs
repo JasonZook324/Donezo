@@ -10,6 +10,9 @@ public class LoginPage : ContentPage
     private Entry _usernameEntry;
     private Entry _passwordEntry;
 
+    // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
+    public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
+
     public LoginPage(INeonDbService db)
     {
         _db = db;
@@ -50,7 +53,7 @@ public class LoginPage : ContentPage
         var ok = await _db.RegisterUserAsync(_usernameEntry.Text ?? string.Empty, _passwordEntry.Text ?? string.Empty);
         await DisplayAlert("Register", ok ? "Success" : "Failed", "OK");
         if (ok)
-            await DisplayAlert("Welcome", $"Hello {_usernameEntry.Text}", "OK");
+            await NavigateToDashboardAsync(_usernameEntry.Text!);
     }
 
     private async void OnLoginClicked(object sender, EventArgs e)
@@ -58,6 +61,11 @@ public class LoginPage : ContentPage
         var ok = await _db.AuthenticateUserAsync(_usernameEntry.Text ?? string.Empty, _passwordEntry.Text ?? string.Empty);
         await DisplayAlert("Login", ok ? "Success" : "Failed", "OK");
         if (ok)
-            await DisplayAlert("Welcome", $"Hello {_usernameEntry.Text}", "OK");
+            await NavigateToDashboardAsync(_usernameEntry.Text!);
+    }
+
+    private async Task NavigateToDashboardAsync(string username)
+    {
+        await Shell.Current.Navigation.PushAsync(new DashboardPage(_db, username));
     }
 }

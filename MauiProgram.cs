@@ -16,9 +16,9 @@ namespace Donezo
                     fonts.AddFont("OpenSans-Semibold.ttf", "OpenSansSemibold");
                 });
 
-            // Register Neon DB service
             builder.Services.AddSingleton<INeonDbService, NeonDbService>();
-            builder.Services.AddTransient<Pages.LoginPage>(sp => new Pages.LoginPage(sp.GetRequiredService<INeonDbService>()));
+            builder.Services.AddTransient<Pages.LoginPage>();
+            builder.Services.AddTransient<Pages.DashboardPage>();
 
 #if DEBUG
             builder.Logging.AddDebug();
