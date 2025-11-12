@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="768" height="768" viewBox="0 0 768 768" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .green { fill: #39F38C; }
+      .text { fill: #ffffff; font-family: Arial, Helvetica, sans-serif; }
+    </style>
+  </defs>
+  <rect width="768" height="768" fill="#000000"/>
+  <g transform="translate(0,30)">
+    <circle cx="384" cy="220" r="150" fill="none" stroke="#39F38C" stroke-width="28"/>
+    <path d="M330 220 L384 274 L478 180" stroke="#39F38C" stroke-width="28" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text class="text" x="384" y="420" font-size="42" text-anchor="middle">From to-do... to Donezo.</text>
+  <text class="green" x="384" y="520" font-size="120" font-weight="700" text-anchor="middle">Donezo</text>
+</svg>

@@ -18,6 +18,8 @@ public class DashboardPage : ContentPage
     private CollectionView _itemsView = null!;
     private Entry _newItemEntry = null!;
     private Button _addItemButton = null!;
+    private Switch _themeSwitch = null!; // light/dark toggle
+    private Label _themeLabel = null!;
 
     private readonly ObservableCollection<ItemRecord> _items = new();
     private IReadOnlyList<ListRecord> _lists = Array.Empty<ListRecord>();
@@ -25,6 +27,7 @@ public class DashboardPage : ContentPage
     private readonly Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8,2), IsVisible = false, FontAttributes = FontAttributes.Bold };
 
     private bool _suppressDailyEvent;
+    private bool _suppressThemeEvent;
     private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
 
     public DashboardPage(INeonDbService db, string username)
@@ -95,6 +98,11 @@ public class DashboardPage : ContentPage
         _newItemEntry = new Entry { Placeholder = "New item name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _addItemButton = new Button { Text = "+ Add", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _addItemButton.Clicked += async (_, _) => await AddItemAsync();
+
+        _themeLabel = new Label { Text = "Light", VerticalTextAlignment = TextAlignment.Center };
+        _themeSwitch = new Switch();
+        _themeSwitch.Toggled += async (s, e) => await OnThemeToggledAsync(e.Value);
+        var themeRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } };
 
         _itemsView = new CollectionView
         {
@@ -199,6 +207,20 @@ public class DashboardPage : ContentPage
             }
         };
 
+        var prefsCard = new Frame
+        {
+            Style = (Style)Application.Current!.Resources["CardFrame"],
+            Content = new VerticalStackLayout
+            {
+                Spacing = 12,
+                Children =
+                {
+                    new Label { Text = "Preferences", Style = (Style)Application.Current!.Resources["SectionTitle"] },
+                    themeRow
+                }
+            }
+        };
+
         var root = new Grid
         {
             RowDefinitions = new RowDefinitionCollection
@@ -215,7 +237,7 @@ public class DashboardPage : ContentPage
             {
                 Padding = new Thickness(20, 10),
                 Spacing = 16,
-                Children = { listsCard, itemsCard }
+                Children = { prefsCard, listsCard, itemsCard }
             }
         }, 0, 1);
 
@@ -230,7 +252,37 @@ public class DashboardPage : ContentPage
             await DisplayAlert("Error", "User not found.", "OK");
             return;
         }
+        await LoadThemePreferenceAsync();
         await RefreshListsAsync();
+    }
+
+    private async Task LoadThemePreferenceAsync()
+    {
+        if (_userId == null) return;
+        var dark = await _db.GetUserThemeDarkAsync(_userId.Value);
+        _suppressThemeEvent = true;
+        _themeSwitch.IsToggled = dark ?? false;
+        ApplyTheme(_themeSwitch.IsToggled);
+        _suppressThemeEvent = false;
+    }
+
+    private async Task OnThemeToggledAsync(bool dark)
+    {
+        if (_suppressThemeEvent) return;
+        ApplyTheme(dark);
+        if (_userId != null)
+        {
+            await _db.SetUserThemeDarkAsync(_userId.Value, dark);
+        }
+    }
+
+    private void ApplyTheme(bool dark)
+    {
+        _themeLabel.Text = dark ? "Dark" : "Light";
+        if (Application.Current is App app)
+        {
+            app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
+        }
     }
 
     private async Task RefreshListsAsync()

@@ -3,6 +3,7 @@
   <defs>
     <style>
       .brand { fill: none; stroke: #39F38C; stroke-width: 32; stroke-linecap: round; stroke-linejoin: round; }
+      .mark { fill: #39F38C; }
     </style>
   </defs>
   <rect width="512" height="512" rx="104" ry="104" fill="#121212"/>

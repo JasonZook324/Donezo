@@ -49,8 +49,10 @@
         </Setter>
     </Style>
 
+    <!-- Updated CheckBox style with explicit Checked/Unchecked states for better dark theme visibility -->
     <Style TargetType="CheckBox">
-        <Setter Property="Color" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource White}}" />
+        <!-- Base (unchecked) color -->
+        <Setter Property="Color" Value="{AppThemeBinding Light={StaticResource Gray400}, Dark={StaticResource Gray500}}" />
         <Setter Property="MinimumHeightRequest" Value="44"/>
         <Setter Property="MinimumWidthRequest" Value="44"/>
         <Setter Property="VisualStateManager.VisualStateGroups">
@@ -60,6 +62,19 @@
                     <VisualState x:Name="Disabled">
                         <VisualState.Setters>
                             <Setter Property="Color" Value="{AppThemeBinding Light={StaticResource Gray300}, Dark={StaticResource Gray600}}" />
+                        </VisualState.Setters>
+                    </VisualState>
+                </VisualStateGroup>
+                <VisualStateGroup x:Name="CheckStates">
+                    <VisualState x:Name="Checked">
+                        <VisualState.Setters>
+                            <!-- Use brand primary color in both themes for strong contrast -->
+                            <Setter Property="Color" Value="{StaticResource Primary}" />
+                        </VisualState.Setters>
+                    </VisualState>
+                    <VisualState x:Name="Unchecked">
+                        <VisualState.Setters>
+                            <Setter Property="Color" Value="{AppThemeBinding Light={StaticResource Gray400}, Dark={StaticResource Gray500}}" />
                         </VisualState.Setters>
                     </VisualState>
                 </VisualStateGroup>

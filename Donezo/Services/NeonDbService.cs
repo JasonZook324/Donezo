@@ -20,6 +20,10 @@ public interface INeonDbService
     Task<bool> DeleteListAsync(int listId, CancellationToken ct = default);
     Task<int> ResetListAsync(int listId, CancellationToken ct = default);
     Task<bool> SetListDailyAsync(int listId, bool isDaily, CancellationToken ct = default);
+
+    // Theme preference
+    Task<bool?> GetUserThemeDarkAsync(int userId, CancellationToken ct = default);
+    Task SetUserThemeDarkAsync(int userId, bool dark, CancellationToken ct = default);
 }
 
 public record ListRecord(int Id, string Name, bool IsDaily);
@@ -268,6 +272,29 @@ public class NeonDbService : INeonDbService
         return rows == 1;
     }
 
+    // User theme preference
+    public async Task<bool?> GetUserThemeDarkAsync(int userId, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("select theme_dark from user_prefs where user_id=@u", conn);
+        cmd.Parameters.AddWithValue("u", userId);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        if (result is DBNull || result is null) return null;
+        return (bool)result;
+    }
+
+    public async Task SetUserThemeDarkAsync(int userId, bool dark, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(@"insert into user_prefs(user_id, theme_dark) values(@u, @d)
+on conflict (user_id) do update set theme_dark=excluded.theme_dark", conn);
+        cmd.Parameters.AddWithValue("u", userId);
+        cmd.Parameters.AddWithValue("d", dark);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     // Store a connection string securely at runtime (e.g. first launch in dev)
     public static async Task StoreDevConnectionStringAsync(string conn) => await SecureStorage.SetAsync("NEON_CONNECTION_STRING", conn);
     private static string? TryGetFromSecureStorage() { try { return SecureStorage.GetAsync("NEON_CONNECTION_STRING").GetAwaiter().GetResult(); } catch { return null; } }
@@ -296,9 +323,14 @@ create table if not exists items (
  created_at timestamptz not null default now());
 -- evolve schema
 alter table if exists lists add column if not exists is_daily boolean not null default false;
-alter table if exists lists add column if not exists last_reset_date date;";
+alter table if exists lists add column if not exists last_reset_date date;
+-- user preferences (theme)
+create table if not exists user_prefs (
+ user_id int primary key references users(id) on delete cascade,
+ theme_dark boolean not null default false
+);";
         await using (var cmd = new NpgsqlCommand(sql, conn)) { await cmd.ExecuteNonQueryAsync(ct); }
-        _schemaEnsured = true; _logger?.LogInformation("Schema ensured (users, lists, items + daily)");
+        _schemaEnsured = true; _logger?.LogInformation("Schema ensured (users, lists, items + daily + user_prefs)");
     }
 
     private static byte[] GenerateSalt(int size) { var salt = new byte[size]; RandomNumberGenerator.Fill(salt); return salt; }
