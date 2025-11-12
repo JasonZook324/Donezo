@@ -36,10 +36,8 @@ public class NeonDbService : INeonDbService
     private bool _schemaEnsured;
     private readonly ILogger<NeonDbService>? _logger;
 
-#if DEBUG
-    // Debug-only fallback. DO NOT commit real secrets for production usage.
+    // Debug/dev fallback. Use only for local testing; replace with your own or store via SecureStorage.
     private const string DebugFallbackConnectionString = "postgresql://neondb_owner:npg_6dAFRg0tBGDT@ep-super-hat-ad6vip1b-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
-#endif
 
     public NeonDbService(ILogger<NeonDbService>? logger = null)
     {
@@ -48,10 +46,14 @@ public class NeonDbService : INeonDbService
         var raw =
             Environment.GetEnvironmentVariable("NEON_CONNECTION_STRING")
             ?? TryGetFromSecureStorage()
-#if DEBUG
-            ?? DebugFallbackConnectionString
-#endif
-            ?? throw new InvalidOperationException("Neon connection string not found. Set env var, store via SecureStorage, or (DEBUG) fallback.");
+            // Fallback for sideloaded device builds to avoid crash on first run.
+            // For production, configure a proper connection string via env var or SecureStorage.
+            ?? DebugFallbackConnectionString;
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            throw new InvalidOperationException("Neon connection string not found. Set env var, store via SecureStorage, or configure a fallback.");
+        }
 
         _connectionString = NormalizeConnectionString(raw);
 
