@@ -22,7 +22,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private Label _themeLabel = null!;
     private Label _headerTitle = null!;
 
-    private readonly ObservableCollection<ItemRecord> _items = new();
+    private readonly ObservableCollection<ItemVm> _items = new();
     private IReadOnlyList<ListRecord> _lists = Array.Empty<ListRecord>();
 
     private readonly Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8,2), IsVisible = false, FontAttributes = FontAttributes.Bold };
@@ -182,13 +182,13 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 };
 
                 var nameLabel = new Label { VerticalTextAlignment = TextAlignment.Center };
-                nameLabel.SetBinding(Label.TextProperty, nameof(ItemRecord.Name));
+                nameLabel.SetBinding(Label.TextProperty, nameof(ItemVm.Name));
 
                 var check = new CheckBox { HorizontalOptions = LayoutOptions.End };
-                check.SetBinding(CheckBox.IsCheckedProperty, nameof(ItemRecord.IsCompleted));
+                check.SetBinding(CheckBox.IsCheckedProperty, nameof(ItemVm.IsCompleted));
                 check.CheckedChanged += async (s, e) =>
                 {
-                    if (((BindableObject)s).BindingContext is ItemRecord ir)
+                    if (((BindableObject)s).BindingContext is ItemVm ir)
                     {
                         await _db.SetItemCompletedAsync(ir.Id, e.Value);
                         ir.IsCompleted = e.Value;
@@ -207,7 +207,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 };
                 deleteBtn.Clicked += async (s, e) =>
                 {
-                    if (((BindableObject)s).BindingContext is ItemRecord ir)
+                    if (((BindableObject)s).BindingContext is ItemVm ir)
                     {
                         if (await _db.DeleteItemAsync(ir.Id))
                         {
@@ -482,7 +482,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
         }
         var items = await _db.GetItemsAsync(listId.Value);
         foreach (var i in items)
-            _items.Add(new ItemRecord(i.Id, i.Name, i.IsCompleted));
+            _items.Add(new ItemVm(i.Id, i.Name, i.IsCompleted));
         UpdateCompletedBadge();
     }
 
@@ -508,7 +508,15 @@ public class DashboardPage : ContentPage, IQueryAttributable
     }
 }
 
-public partial record ItemRecord(int Id, string Name, bool IsCompleted)
+public class ItemVm
 {
-    public bool IsCompleted { get; set; } = IsCompleted;
+    public int Id { get; }
+    public string Name { get; }
+    public bool IsCompleted { get; set; }
+    public ItemVm(int id, string name, bool isCompleted)
+    {
+        Id = id;
+        Name = name;
+        IsCompleted = isCompleted;
+    }
 }

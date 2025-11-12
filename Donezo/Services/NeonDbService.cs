@@ -2,13 +2,14 @@ using Npgsql;
 using Microsoft.Maui.Storage;
 using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
+using System.Text.RegularExpressions;
 
 namespace Donezo.Services;
 
 public interface INeonDbService
 {
     Task<string> PingAsync(CancellationToken ct = default);
-    Task<bool> RegisterUserAsync(string username, string password, CancellationToken ct = default);
+    Task<bool> RegisterUserAsync(string username, string password, string email, string firstName, string lastName, CancellationToken ct = default);
     Task<bool> AuthenticateUserAsync(string username, string password, CancellationToken ct = default);
     Task<int?> GetUserIdAsync(string username, CancellationToken ct = default);
     Task<IReadOnlyList<ListRecord>> GetListsAsync(int userId, CancellationToken ct = default);
@@ -126,17 +127,38 @@ public class NeonDbService : INeonDbService
         await using var cmd = new NpgsqlCommand("select version();", conn); return (string?)await cmd.ExecuteScalarAsync(ct) ?? "unknown";
     }
 
-    public async Task<bool> RegisterUserAsync(string username, string password, CancellationToken ct = default)
+    public async Task<bool> RegisterUserAsync(string username, string password, string email, string firstName, string lastName, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password) || password.Length < 6) return false;
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password) || password.Length < 6)
+            return false;
+        if (string.IsNullOrWhiteSpace(email) || !Regex.IsMatch(email, @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
+            return false;
+        if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
+            return false;
+
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using (var check = new NpgsqlCommand("select 1 from users where username=@u", conn)) { check.Parameters.AddWithValue("u", username); if (await check.ExecuteScalarAsync(ct) != null) return false; }
+
+        // Check username or email exists
+        await using (var check = new NpgsqlCommand("select 1 from users where lower(username)=lower(@u) or lower(email)=lower(@e)", conn))
+        {
+            check.Parameters.AddWithValue("u", username);
+            check.Parameters.AddWithValue("e", email);
+            if (await check.ExecuteScalarAsync(ct) != null) return false;
+        }
         // Hash password
         var salt = GenerateSalt(16);
         var hash = HashPassword(password, salt, 100_000);
-        await using (var ins = new NpgsqlCommand("insert into users(username,password_hash,password_salt) values(@u,@h,@s)", conn))
-        { ins.Parameters.AddWithValue("u", username); ins.Parameters.AddWithValue("h", hash); ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt)); await ins.ExecuteNonQueryAsync(ct); }
+        await using (var ins = new NpgsqlCommand("insert into users(username,email,first_name,last_name,password_hash,password_salt) values(@u,@e,@f,@l,@h,@s)", conn))
+        {
+            ins.Parameters.AddWithValue("u", username);
+            ins.Parameters.AddWithValue("e", email);
+            ins.Parameters.AddWithValue("f", firstName);
+            ins.Parameters.AddWithValue("l", lastName);
+            ins.Parameters.AddWithValue("h", hash);
+            ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt));
+            await ins.ExecuteNonQueryAsync(ct);
+        }
         _logger?.LogInformation("Registered user {Username}", username);
         return true;
     }
@@ -306,6 +328,9 @@ on conflict (user_id) do update set theme_dark=excluded.theme_dark", conn);
         var sql = @"create table if not exists users (
  id serial primary key,
  username text not null unique,
+ email text,
+ first_name text,
+ last_name text,
  password_hash text not null,
  password_salt text not null,
  created_at timestamptz not null default now());
@@ -328,9 +353,15 @@ alter table if exists lists add column if not exists last_reset_date date;
 create table if not exists user_prefs (
  user_id int primary key references users(id) on delete cascade,
  theme_dark boolean not null default false
-);";
+);
+-- evolve users for profile info
+alter table if exists users add column if not exists email text;
+alter table if exists users add column if not exists first_name text;
+alter table if exists users add column if not exists last_name text;
+-- unique (case-insensitive) email when present
+create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null;";
         await using (var cmd = new NpgsqlCommand(sql, conn)) { await cmd.ExecuteNonQueryAsync(ct); }
-        _schemaEnsured = true; _logger?.LogInformation("Schema ensured (users, lists, items + daily + user_prefs)");
+        _schemaEnsured = true; _logger?.LogInformation("Schema ensured (users, lists, items + daily + user_prefs + email/name)");
     }
 
     private static byte[] GenerateSalt(int size) { var salt = new byte[size]; RandomNumberGenerator.Fill(salt); return salt; }

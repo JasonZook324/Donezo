@@ -19,6 +19,7 @@ namespace Donezo
             builder.Services.AddSingleton<INeonDbService, NeonDbService>();
             builder.Services.AddTransient<Pages.LoginPage>();
             builder.Services.AddTransient<Pages.DashboardPage>();
+            builder.Services.AddTransient<Pages.RegisterPage>(); // register register page for DI
 
 #if DEBUG
             builder.Logging.AddDebug();
