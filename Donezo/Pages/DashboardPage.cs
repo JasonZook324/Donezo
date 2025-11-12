@@ -11,6 +11,7 @@ public class DashboardPage : ContentPage
     private Picker _listsPicker = null!;
     private Entry _newListEntry = null!;
     private Button _createListButton = null!;
+    private Button _deleteListButton = null!;
     private CollectionView _itemsView = null!;
     private Entry _newItemEntry = null!;
     private Button _addItemButton = null!;
@@ -70,6 +71,9 @@ public class DashboardPage : ContentPage
         _createListButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         _createListButton.Clicked += async (_, _) => await CreateListAsync();
 
+        _deleteListButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
+        _deleteListButton.Clicked += async (_, _) => await DeleteCurrentListAsync();
+
         _newItemEntry = new Entry { Placeholder = "New item name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _addItemButton = new Button { Text = "+ Add", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _addItemButton.Clicked += async (_, _) => await AddItemAsync();
@@ -86,6 +90,7 @@ public class DashboardPage : ContentPage
                     ColumnDefinitions = new ColumnDefinitionCollection
                     {
                         new ColumnDefinition(GridLength.Star),
+                        new ColumnDefinition(GridLength.Auto),
                         new ColumnDefinition(GridLength.Auto)
                     }
                 };
@@ -104,8 +109,29 @@ public class DashboardPage : ContentPage
                     }
                 };
 
+                var deleteBtn = new Button
+                {
+                    Text = "Delete",
+                    Style = (Style)Application.Current!.Resources["OutlinedButton"],
+                    TextColor = Colors.Red,
+                    FontSize = 12,
+                    Padding = new Thickness(6,2),
+                    MinimumWidthRequest = 52
+                };
+                deleteBtn.Clicked += async (s, e) =>
+                {
+                    if (((BindableObject)s).BindingContext is ItemRecord ir)
+                    {
+                        if (await _db.DeleteItemAsync(ir.Id))
+                        {
+                            _items.Remove(ir);
+                        }
+                    }
+                };
+
                 grid.Add(nameLabel);
                 grid.Add(check, 1, 0);
+                grid.Add(deleteBtn, 2, 0);
                 card.Content = grid;
                 return card;
             })
@@ -121,7 +147,7 @@ public class DashboardPage : ContentPage
                 {
                     new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] },
                     _listsPicker,
-                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton } }
+                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton } }
                 }
             }
         };
@@ -191,6 +217,19 @@ public class DashboardPage : ContentPage
         await _db.CreateListAsync(_userId.Value, name);
         _newListEntry.Text = string.Empty;
         await RefreshListsAsync();
+    }
+
+    private async Task DeleteCurrentListAsync()
+    {
+        var id = SelectedListId;
+        if (id == null) return;
+        var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel");
+        if (!confirm) return;
+        if (await _db.DeleteListAsync(id.Value))
+        {
+            await RefreshListsAsync();
+            _items.Clear();
+        }
     }
 
     private async Task RefreshItemsAsync()
