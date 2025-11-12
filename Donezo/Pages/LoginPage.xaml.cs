@@ -1,4 +1,5 @@
 using Microsoft.Maui.Controls;
+using Microsoft.Maui.Controls.Shapes;
 using Donezo.Services;
 using Microsoft.Maui.Storage;
 
@@ -8,8 +9,9 @@ public class LoginPage : ContentPage
 {
     private readonly INeonDbService _db;
 
-    private Entry _usernameEntry;
-    private Entry _passwordEntry;
+    private Entry _usernameEntry = null!;
+    private Entry _passwordEntry = null!;
+    private Label _loginErrorLabel = null!;
 
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
     public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
@@ -25,19 +27,20 @@ public class LoginPage : ContentPage
     {
         _usernameEntry = new Entry { Placeholder = "username", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _passwordEntry = new Entry { Placeholder = "password", IsPassword = true, Style = (Style)Application.Current!.Resources["FilledEntry"] };
+        _usernameEntry.TextChanged += (_, _) => HideError();
+        _passwordEntry.TextChanged += (_, _) => HideError();
 
-        var registerButton = new Button { Text = "Register", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
-        registerButton.Clicked += OnRegisterClicked;
-        var loginButton = new Button { Text = "Login", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        var loginButton = new Button { Text = "Login", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         loginButton.Clicked += OnLoginClicked;
 
-        var logo = new Image
+        _loginErrorLabel = new Label
         {
-            Source = "donezo_logo_vertical.svg",
-            HeightRequest = 180,
-            WidthRequest = 180,
-            HorizontalOptions = LayoutOptions.Center
+            TextColor = Colors.Red,
+            FontAttributes = FontAttributes.Bold,
+            IsVisible = false
         };
+
+        var logo = BuildLogoView();
 
         var tagline = new Label
         {
@@ -58,39 +61,91 @@ public class LoginPage : ContentPage
                 {
                     logo,
                     tagline,
+                    _loginErrorLabel,
                     new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
                     _usernameEntry,
                     new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
                     _passwordEntry,
-                    new HorizontalStackLayout
-                    {
-                        Spacing = 12,
-                        Children = { registerButton, loginButton }
-                    }
+                    loginButton
                 }
             }
         };
     }
 
-    private async void OnRegisterClicked(object sender, EventArgs e)
+    private View BuildLogoView()
     {
-        var ok = await _db.RegisterUserAsync(_usernameEntry.Text ?? string.Empty, _passwordEntry.Text ?? string.Empty);
-        await DisplayAlert("Register", ok ? "Success" : "Failed", "OK");
-        if (ok)
-            await NavigateToDashboardAsync(_usernameEntry.Text!);
+        var primary = (Color)Application.Current!.Resources["Primary"];        
+        var size = 128d;
+        var circle = new Ellipse
+        {
+            WidthRequest = size,
+            HeightRequest = size,
+            Stroke = new SolidColorBrush(primary),
+            StrokeThickness = 8,
+            Fill = Colors.Transparent
+        };
+        var check = new Polyline
+        {
+            Stroke = new SolidColorBrush(primary),
+            StrokeThickness = 8,
+            StrokeLineJoin = PenLineJoin.Round,
+            StrokeLineCap = PenLineCap.Round,
+            Points = new PointCollection
+            {
+                new(38, 64), new(60, 86), new(94, 52)
+            }
+        };
+        var grid = new Grid
+        {
+            HorizontalOptions = LayoutOptions.Center,
+            Margin = new Thickness(0,0,0,8),
+            WidthRequest = size,
+            HeightRequest = size
+        };
+        grid.Add(circle);
+        grid.Add(check);
+        return grid;
+    }
+
+    private void HideError()
+    {
+        if (_loginErrorLabel.IsVisible)
+            _loginErrorLabel.IsVisible = false;
     }
 
     private async void OnLoginClicked(object sender, EventArgs e)
     {
-        var ok = await _db.AuthenticateUserAsync(_usernameEntry.Text ?? string.Empty, _passwordEntry.Text ?? string.Empty);
-        await DisplayAlert("Login", ok ? "Success" : "Failed", "OK");
-        if (ok)
-            await NavigateToDashboardAsync(_usernameEntry.Text!);
+        _loginErrorLabel.IsVisible = false; // reset
+
+        var username = _usernameEntry.Text ?? string.Empty;
+        var password = _passwordEntry.Text ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        {
+            ShowError("Username and password required.");
+            return;
+        }
+
+        var ok = await _db.AuthenticateUserAsync(username, password);
+        if (!ok)
+        {
+            ShowError("Invalid username or password.");
+            return;
+        }
+
+        await NavigateToDashboardAsync(username);
+    }
+
+    private void ShowError(string message)
+    {
+        _loginErrorLabel.Text = message;
+        _loginErrorLabel.IsVisible = true;
     }
 
     private async Task NavigateToDashboardAsync(string username)
     {
         await SecureStorage.SetAsync("AUTH_USERNAME", username);
-        await Shell.Current.Navigation.PushAsync(new DashboardPage(_db, username));
+        // Navigate to dashboard route with username as query parameter
+        await Shell.Current.GoToAsync($"//dashboard?username={Uri.EscapeDataString(username)}");
     }
 }

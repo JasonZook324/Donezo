@@ -4,10 +4,10 @@ using Microsoft.Maui.Storage;
 
 namespace Donezo.Pages;
 
-public class DashboardPage : ContentPage
+public class DashboardPage : ContentPage, IQueryAttributable
 {
-    private readonly INeonDbService _db;
-    private readonly string _username;
+    private INeonDbService _db;
+    private string _username = string.Empty;
     private int? _userId;
     private Picker _listsPicker = null!;
     private Entry _newListEntry = null!;
@@ -20,6 +20,7 @@ public class DashboardPage : ContentPage
     private Button _addItemButton = null!;
     private Switch _themeSwitch = null!; // light/dark toggle
     private Label _themeLabel = null!;
+    private Label _headerTitle = null!;
 
     private readonly ObservableCollection<ItemRecord> _items = new();
     private IReadOnlyList<ListRecord> _lists = Array.Empty<ListRecord>();
@@ -28,33 +29,73 @@ public class DashboardPage : ContentPage
 
     private bool _suppressDailyEvent;
     private bool _suppressThemeEvent;
+    private bool _initialized;
     private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
+
+    // Parameterless ctor for Shell route activation
+    public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
 
     public DashboardPage(INeonDbService db, string username)
     {
         _db = db;
-        _username = username;
+        _username = username ?? string.Empty;
         Title = "Dashboard";
         BuildUi();
-        Loaded += async (_, _) => await InitializeAsync();
+        if (!string.IsNullOrWhiteSpace(_username))
+        {
+            // Initialize when username is known
+            _ = InitializeAsync();
+        }
+    }
+
+    public void ApplyQueryAttributes(IDictionary<string, object> query)
+    {
+        if (query.TryGetValue("username", out var val) && val is string name && !string.IsNullOrWhiteSpace(name))
+        {
+            _username = name;
+            if (_headerTitle != null)
+            {
+                _headerTitle.Text = $"Welcome, {_username}";
+            }
+            if (!_initialized)
+            {
+                _ = InitializeAsync();
+            }
+        }
+    }
+
+    private async Task LogoutAsync()
+    {
+        try
+        {
+            SecureStorage.Remove("AUTH_USERNAME");
+        }
+        catch { /* ignore */ }
+
+        try
+        {
+            await Shell.Current.GoToAsync("//login");
+        }
+        catch { /* ignore */ }
     }
 
     private View Header()
     {
+        // Simplified header: remove row spanning which caused clipping.
         var grid = new Grid
         {
-            Padding = new Thickness(20, 30, 20, 10),
+            Padding = new Thickness(20, 30, 20, 30), // added bottom padding
             BackgroundColor = (Color)Application.Current!.Resources["Primary"],
-            RowDefinitions = new RowDefinitionCollection
+            ColumnDefinitions = new ColumnDefinitionCollection
             {
-                new RowDefinition(GridLength.Auto),
-                new RowDefinition(GridLength.Auto)
+                new ColumnDefinition(GridLength.Star),
+                new ColumnDefinition(GridLength.Auto)
             }
         };
 
-        var title = new Label
+        _headerTitle = new Label
         {
-            Text = $"Welcome, {_username}",
+            Text = string.IsNullOrWhiteSpace(_username) ? "Welcome" : $"Welcome, {_username}",
             TextColor = Colors.White,
             FontSize = 24,
             FontAttributes = FontAttributes.Bold
@@ -63,11 +104,32 @@ public class DashboardPage : ContentPage
         {
             Text = "Manage your lists",
             TextColor = Colors.White,
-            Opacity = 0.85
+            Opacity = 0.9,
+            FontSize = 14
         };
 
-        grid.Add(title);
-        grid.Add(subtitle, 0, 1);
+        var titleStack = new VerticalStackLayout
+        {
+            Spacing = 4,
+            Children = { _headerTitle, subtitle }
+        };
+
+        var logoutBtn = new Button
+        {
+            Text = "Logout",
+            BackgroundColor = Colors.Transparent,
+            TextColor = Colors.White,
+            BorderColor = Colors.White,
+            BorderWidth = 1,
+            CornerRadius = 8,
+            Padding = new Thickness(12,6),
+            HorizontalOptions = LayoutOptions.End,
+            VerticalOptions = LayoutOptions.Center
+        };
+        logoutBtn.Clicked += async (_, _) => await LogoutAsync();
+
+        grid.Add(titleStack, 0, 0);
+        grid.Add(logoutBtn, 1, 0);
         return grid;
     }
 
@@ -246,6 +308,8 @@ public class DashboardPage : ContentPage
 
     private async Task InitializeAsync()
     {
+        if (_initialized) return;
+        _initialized = true;
         _userId = await _db.GetUserIdAsync(_username);
         if (_userId == null)
         {

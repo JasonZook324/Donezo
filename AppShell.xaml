@@ -6,8 +6,21 @@
     xmlns:pages="clr-namespace:Donezo.Pages"
     Title="Donezo">
 
+    <TabBar>
+        <ShellContent
+            Title="Login"
+            Route="login"
+            ContentTemplate="{DataTemplate pages:LoginPage}" />
+        <ShellContent
+            Title="Register"
+            Route="register"
+            ContentTemplate="{DataTemplate pages:RegisterPage}" />
+    </TabBar>
+
+    <!-- Dashboard outside TabBar so tabs are hidden when selected -->
     <ShellContent
-        Route="login"
-        ContentTemplate="{DataTemplate pages:LoginPage}" />
+        Title="Dashboard"
+        Route="dashboard"
+        ContentTemplate="{DataTemplate pages:DashboardPage}" />
 
 </Shell>
