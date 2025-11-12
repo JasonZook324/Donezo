@@ -32,6 +32,11 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private bool _initialized;
     private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
 
+    // Responsive layout fields
+    private Grid _twoPaneGrid = null!;
+    private Frame _listsCard = null!;
+    private Frame _itemsCard = null!;
+
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
 
@@ -46,6 +51,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
             // Initialize when username is known
             _ = InitializeAsync();
         }
+
+        SizeChanged += (_, _) => ApplyResponsiveLayout(Width);
     }
 
     public void ApplyQueryAttributes(IDictionary<string, object> query)
@@ -66,17 +73,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
 
     private async Task LogoutAsync()
     {
-        try
-        {
-            SecureStorage.Remove("AUTH_USERNAME");
-        }
-        catch { /* ignore */ }
-
-        try
-        {
-            await Shell.Current.GoToAsync("//login");
-        }
-        catch { /* ignore */ }
+        try { SecureStorage.Remove("AUTH_USERNAME"); } catch { }
+        try { await Shell.Current.GoToAsync("//login"); } catch { }
     }
 
     private View Header()
@@ -238,7 +236,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
         listsHeader.Add(new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] });
         listsHeader.Add(_completedBadge, 1, 0);
 
-        var listsCard = new Frame
+        _listsCard = new Frame
         {
             Style = (Style)Application.Current!.Resources["CardFrame"],
             Content = new VerticalStackLayout
@@ -254,7 +252,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
             }
         };
 
-        var itemsCard = new Frame
+        _itemsCard = new Frame
         {
             Style = (Style)Application.Current!.Resources["CardFrame"],
             Content = new VerticalStackLayout
@@ -283,6 +281,23 @@ public class DashboardPage : ContentPage, IQueryAttributable
             }
         };
 
+        // Responsive two-pane grid (lists left, items right)
+        _twoPaneGrid = new Grid
+        {
+            ColumnSpacing = 16,
+            RowSpacing = 16
+        };
+        // Add children once; we will just switch rows/columns in ApplyResponsiveLayout
+        _twoPaneGrid.Add(_listsCard, 0, 0);
+        _twoPaneGrid.Add(_itemsCard, 1, 0);
+
+        var contentStack = new VerticalStackLayout
+        {
+            Padding = new Thickness(20, 10),
+            Spacing = 16,
+            Children = { prefsCard, _twoPaneGrid }
+        };
+
         var root = new Grid
         {
             RowDefinitions = new RowDefinitionCollection
@@ -293,17 +308,45 @@ public class DashboardPage : ContentPage, IQueryAttributable
         };
 
         root.Add(Header(), 0, 0);
-        root.Add(new ScrollView
-        {
-            Content = new VerticalStackLayout
-            {
-                Padding = new Thickness(20, 10),
-                Spacing = 16,
-                Children = { prefsCard, listsCard, itemsCard }
-            }
-        }, 0, 1);
+        root.Add(new ScrollView { Content = contentStack }, 0, 1);
 
         Content = root;
+
+        // Initial responsive layout
+        ApplyResponsiveLayout(Width);
+    }
+
+    private void ApplyResponsiveLayout(double width)
+    {
+        if (_twoPaneGrid == null) return;
+        const double threshold = 900; // px
+        _twoPaneGrid.ColumnDefinitions.Clear();
+        _twoPaneGrid.RowDefinitions.Clear();
+
+        if (width >= threshold)
+        {
+            // Side-by-side
+            _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
+            _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
+            _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+
+            Grid.SetColumn(_listsCard, 0);
+            Grid.SetRow(_listsCard, 0);
+            Grid.SetColumn(_itemsCard, 1);
+            Grid.SetRow(_itemsCard, 0);
+        }
+        else
+        {
+            // Stacked
+            _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
+            _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+            _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+
+            Grid.SetColumn(_listsCard, 0);
+            Grid.SetRow(_listsCard, 0);
+            Grid.SetColumn(_itemsCard, 0);
+            Grid.SetRow(_itemsCard, 1);
+        }
     }
 
     private async Task InitializeAsync()
