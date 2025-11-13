@@ -29,6 +29,9 @@ public class LoginPage : ContentPage
         _passwordEntry = new Entry { Placeholder = "password", IsPassword = true, Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _usernameEntry.TextChanged += (_, _) => HideError();
         _passwordEntry.TextChanged += (_, _) => HideError();
+        // ENTER submits form from any field
+        _usernameEntry.Completed += OnAnyEntryCompleted;
+        _passwordEntry.Completed += OnAnyEntryCompleted;
 
         var loginButton = new Button { Text = "Login", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         loginButton.Clicked += OnLoginClicked;
@@ -70,6 +73,12 @@ public class LoginPage : ContentPage
                 }
             }
         };
+    }
+
+    private void OnAnyEntryCompleted(object? sender, EventArgs e)
+    {
+        // Delegate to click handler so logic stays in one place
+        OnLoginClicked(sender!, e);
     }
 
     private View BuildLogoView()
