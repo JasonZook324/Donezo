@@ -62,6 +62,15 @@ public class RegisterPage : ContentPage
         var registerButton = new Button { Text = "Register", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         registerButton.Clicked += OnRegisterClicked;
 
+        // ENTER submits form from any field
+        _usernameEntry.Completed += OnAnyEntryCompleted;
+        _emailEntry.Completed += OnAnyEntryCompleted;
+        _firstNameEntry.Completed += OnAnyEntryCompleted;
+        _lastNameEntry.Completed += OnAnyEntryCompleted;
+        _passwordEntry.Completed += OnAnyEntryCompleted;
+        _confirmEntry.Completed += OnAnyEntryCompleted;
+        _captchaEntry.Completed += OnAnyEntryCompleted;
+
         Content = new ScrollView
         {
             Content = new VerticalStackLayout
@@ -88,6 +97,11 @@ public class RegisterPage : ContentPage
                 }
             }
         };
+    }
+
+    private void OnAnyEntryCompleted(object? sender, EventArgs e)
+    {
+        OnRegisterClicked(sender!, e);
     }
 
     private void GenerateCaptcha()
