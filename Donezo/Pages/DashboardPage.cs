@@ -75,9 +75,23 @@ public class ItemVm : BindableObject
     public int Id { get; }
     public int ListId { get; }
     private string _name;
-    // Make setter public for inline rename updates
     public string Name { get => _name; set { if (_name == value) return; _name = value; OnPropertyChanged(nameof(Name)); } }
-    public bool IsCompleted { get; set; }
+
+    private bool _isCompleted;
+    public bool IsCompleted
+    {
+        get => _isCompleted;
+        set
+        {
+            if (_isCompleted == value) return;
+            _isCompleted = value;
+            OnPropertyChanged(nameof(IsCompleted));
+            OnPropertyChanged(nameof(AttributionText));
+            OnPropertyChanged(nameof(AttributionColor));
+            RecalcState();
+        }
+    }
+
     public int? ParentId { get; }
     public bool HasChildren { get; }
     public int ChildrenCount { get; }
@@ -114,13 +128,29 @@ public class ItemVm : BindableObject
     private string _editableName = string.Empty;
     public string EditableName { get => _editableName; set { if (_editableName == value) return; _editableName = value; OnPropertyChanged(nameof(EditableName)); } }
 
+    // Theme tick used to force style refresh without rebuilding collection
+    private int _themeTick;
+    public int ThemeTick { get => _themeTick; set { if (_themeTick == value) return; _themeTick = value; OnPropertyChanged(nameof(ThemeTick)); } }
+
     public CompletionVisualState CompletionState { get; private set; }
     public string PartialGlyph => CompletionState == CompletionVisualState.Partial ? "-" : string.Empty;
     public string ExpandGlyph => HasChildren ? (_isExpanded ? "v" : ">") : string.Empty;
 
-    public ItemVm(int id, int listId, string name, bool isCompleted, int? parentId, bool hasChildren, int childrenCount, int incompleteChildrenCount, int level, bool isExpanded, int order, string sortKey)
+    private string? _completedByUsername;
+    public string? CompletedByUsername { get => _completedByUsername; set { if (_completedByUsername == value) return; _completedByUsername = value; OnPropertyChanged(nameof(CompletedByUsername)); OnPropertyChanged(nameof(AttributionText)); OnPropertyChanged(nameof(AttributionColor)); } }
+    private string? _lastActionUsername;
+    public string? LastActionUsername { get => _lastActionUsername; set { if (_lastActionUsername == value) return; _lastActionUsername = value; OnPropertyChanged(nameof(LastActionUsername)); OnPropertyChanged(nameof(AttributionText)); OnPropertyChanged(nameof(AttributionColor)); } }
+    private bool? _lastActionCompleted;
+    public bool? LastActionCompleted { get => _lastActionCompleted; set { if (_lastActionCompleted == value) return; _lastActionCompleted = value; OnPropertyChanged(nameof(LastActionCompleted)); OnPropertyChanged(nameof(AttributionText)); OnPropertyChanged(nameof(AttributionColor)); } }
+
+    // Computed attribution text/color exposed for binding
+    public string AttributionText
+        => string.IsNullOrWhiteSpace(IsCompleted ? CompletedByUsername : LastActionUsername) ? string.Empty : $"({(IsCompleted ? CompletedByUsername : LastActionUsername)})";
+    public Color AttributionColor => IsCompleted ? Colors.Green : Colors.Red;
+
+    public ItemVm(int id, int listId, string name, bool isCompleted, int? parentId, bool hasChildren, int childrenCount, int incompleteChildrenCount, int level, bool isExpanded, int order, string sortKey, string? completedBy, string? lastActionUser, bool? lastActionCompleted)
     {
-        Id = id; ListId = listId; _name = name; IsCompleted = isCompleted; ParentId = parentId; HasChildren = hasChildren; ChildrenCount = childrenCount; IncompleteChildrenCount = incompleteChildrenCount; Level = level; _isExpanded = isExpanded; Order = order; SortKey = sortKey; RecalcState();
+        Id = id; ListId = listId; _name = name; _isCompleted = isCompleted; ParentId = parentId; HasChildren = hasChildren; ChildrenCount = childrenCount; IncompleteChildrenCount = incompleteChildrenCount; Level = level; _isExpanded = isExpanded; Order = order; SortKey = sortKey; _completedByUsername = completedBy; _lastActionUsername = lastActionUser; _lastActionCompleted = lastActionCompleted; RecalcState();
     }
     public void RecalcState()
     {
@@ -175,6 +205,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private bool _suppressDailyEvent;
     private bool _suppressThemeEvent;
     private bool _initialized;
+    private bool _itemsLoaded; // new: guard rebuilds until first load completes
     private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
 
     // Responsive layout fields
@@ -205,8 +236,9 @@ public class DashboardPage : ContentPage, IQueryAttributable
         SizeChanged += (_, _) => ApplyResponsiveLayout(Width);
         Application.Current!.RequestedThemeChanged += (_, __) =>
         {
-            // Force rebind so theme-aware converters re-evaluate consistently
-            MainThread.BeginInvokeOnMainThread(RebuildVisibleItems);
+            if (!_itemsLoaded) return;
+            // Instead of rebuilding collection (causes flashing), tick each item to force style refresh.
+            foreach (var vm in _items) vm.ThemeTick++;
         };
     }
 
@@ -287,7 +319,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
     {
         _listsPicker = new Picker { Title = "Select List" };
         _listsPicker.ItemDisplayBinding = new Binding("Name");
-        _listsPicker.SelectedIndexChanged += async (_, _) => { await RefreshItemsAsync(); SyncDailyCheckboxWithSelectedList(); RestoreFocusAfterListChange(); };
+        _listsPicker.SelectedIndexChanged += async (_, _) => { await RefreshItemsAsync(); SyncDailyCheckboxWithSelectedList(); RestoreFocusAfterListChange(); try { if (_userId != null && SelectedListId != null) await _db.SetLastSelectedListIdAsync(_userId.Value, SelectedListId.Value); } catch { } };
 
         _newListEntry = new Entry { Placeholder = "New list name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
@@ -406,8 +438,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
                     new ColumnDefinition(GridLength.Star),
                     new ColumnDefinition(GridLength.Auto),
                     new ColumnDefinition(GridLength.Auto),
-                    new ColumnDefinition(GridLength.Auto), // rename/save
-                    new ColumnDefinition(GridLength.Auto)  // cancel
+                    new ColumnDefinition(GridLength.Auto),
+                    new ColumnDefinition(GridLength.Auto) // rename/save
                 }
             };
 
@@ -475,15 +507,21 @@ public class DashboardPage : ContentPage, IQueryAttributable
             var dragOnName = new DragGestureRecognizer { CanDrag = true }; dragOnName.DragStarting += OnDragStarting; nameContainer.GestureRecognizers.Add(dragOnName);
             grid.Add(nameContainer, 2, 0);
 
-            // status + checkbox
-            var statusStack = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, ColumnSpacing = 4 };
+            // status + checkbox + username
+            var statusStack = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, ColumnSpacing = 4 };
             var check = new CheckBox { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
             check.SetBinding(CheckBox.IsCheckedProperty, nameof(ItemVm.IsCompleted));
+
+            var userLabel = new Label { VerticalTextAlignment = TextAlignment.Center, FontSize = 12 };
+            userLabel.SetBinding(Label.TextProperty, nameof(ItemVm.AttributionText));
+            userLabel.SetBinding(Label.TextColorProperty, nameof(ItemVm.AttributionColor));
+
             check.CheckedChanged += async (s, e) =>
             {
                 if (((BindableObject)s).BindingContext is ItemVm ir)
                 {
-                    var ok = await _db.SetItemCompletedAsync(ir.Id, e.Value);
+                    if (_userId == null) return;
+                    var ok = await _db.SetItemCompletedByUserAsync(ir.Id, e.Value, _userId.Value);
                     if (!ok)
                     {
                         await DisplayAlert("Blocked", "Parent cannot be completed until all direct children are complete.", "OK");
@@ -491,11 +529,12 @@ public class DashboardPage : ContentPage, IQueryAttributable
                         return;
                     }
                     ir.IsCompleted = e.Value; UpdateParentStates(ir); UpdateCompletedBadge();
+                    await RefreshSingleItemAsync(ir.Id);
                 }
             };
             var partialIndicator = new Label { TextColor = Colors.Orange, FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center, HorizontalTextAlignment = TextAlignment.Center, FontSize = 14, WidthRequest = 12 };
             partialIndicator.SetBinding(Label.TextProperty, nameof(ItemVm.PartialGlyph));
-            statusStack.Add(check, 0, 0); statusStack.Add(partialIndicator, 1, 0);
+            statusStack.Add(userLabel, 0, 0); statusStack.Add(check, 1, 0); statusStack.Add(partialIndicator, 2, 0);
             grid.Add(statusStack, 3, 0);
 
             // delete button
@@ -574,7 +613,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
                         applyStyle(vm);
                         PropertyChangedEventHandler handler = (sender, args) =>
                         {
-                            if (args.PropertyName == nameof(ItemVm.IsDragging) || args.PropertyName == nameof(ItemVm.IsPreDrag) || args.PropertyName == nameof(ItemVm.IsSelected))
+                            if (args.PropertyName == nameof(ItemVm.IsDragging) || args.PropertyName == nameof(ItemVm.IsPreDrag) || args.PropertyName == nameof(ItemVm.IsSelected) || args.PropertyName == nameof(ItemVm.ThemeTick))
                             {
                                 applyStyle(vm);
                             }
@@ -612,9 +651,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 }
             };
             pointer.PointerReleased += (s, e) => { _holdCts?.Cancel(); };
-            var tap = new TapGestureRecognizer(); tap.Tapped += (s,e)=>{ /* selection handled by pointer */ }; card.GestureRecognizers.Add(tap);
+            var tap = new TapGestureRecognizer(); tap.Tapped += (s,e)=>{ }; card.GestureRecognizers.Add(tap);
 
-            // Root layout combines external gaps and card
             var root = new VerticalStackLayout { Spacing = 0, Children = { card, bottomGap } };
             return root;
         });
@@ -863,11 +901,17 @@ public class DashboardPage : ContentPage, IQueryAttributable
     {
         _themeLabel.Text = dark ? "Dark" : "Light";
         if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
-        RebuildVisibleItems(); // ensure theme-aware bindings update
+        if (_itemsLoaded)
+        {
+            foreach (var vm in _items) vm.ThemeTick++;
+        }
     }
 
     private async Task RefreshListsAsync()
-    { if (_userId == null) return; _lists = await _db.GetListsAsync(_userId.Value); _listsPicker.ItemsSource = _lists.Count == 0 ? new List<ListRecord>() : _lists.ToList(); _listsPicker.SelectedIndex = _lists.Count > 0 ? 0 : -1; SyncDailyCheckboxWithSelectedList(); }
+    { if (_userId == null) return; _lists = await _db.GetListsAsync(_userId.Value); _listsPicker.ItemsSource = _lists.Count == 0 ? new List<ListRecord>() : _lists.ToList();
+      int restoredIndex = -1; if (_lists.Count > 0)
+      { try { var lastId = await _db.GetLastSelectedListIdAsync(_userId.Value); if (lastId != null) { var idx = _lists.ToList().FindIndex(l => l.Id == lastId.Value); if (idx >= 0) restoredIndex = idx; } } catch { } }
+      _listsPicker.SelectedIndex = restoredIndex >= 0 ? restoredIndex : (_lists.Count > 0 ? 0 : -1); SyncDailyCheckboxWithSelectedList(); }
 
     private void SyncDailyCheckboxWithSelectedList()
     { var id = SelectedListId; _suppressDailyEvent = true; if (id == null) _dailyCheck.IsChecked = false; else { var lr = _lists.FirstOrDefault(x => x.Id == id); _dailyCheck.IsChecked = lr?.IsDaily ?? false; } _suppressDailyEvent = false; }
@@ -887,7 +931,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private async Task RefreshItemsAsync()
     {
         if (_isRefreshing) return; _isRefreshing = true;
-        _items.Clear(); _allItems.Clear(); var listId = SelectedListId; if (listId == null) { UpdateCompletedBadge(); _isRefreshing = false; UpdateChildControls(); return; }
+        _allItems.Clear(); var listId = SelectedListId; if (listId == null) { _items.Clear(); UpdateCompletedBadge(); _isRefreshing = false; UpdateChildControls(); return; }
         if (_userId != null)
             _expandedStates = (await _db.GetExpandedStatesAsync(_userId.Value, listId.Value)).ToDictionary(k => k.Key, v => v.Value);
         var items = await _db.GetItemsAsync(listId.Value);
@@ -895,19 +939,18 @@ public class DashboardPage : ContentPage, IQueryAttributable
         foreach (var i in items)
         {
             var isExpanded = _expandedStates.TryGetValue(i.Id, out var ex) ? ex : true;
-            var vm = new ItemVm(i.Id, i.ListId, i.Name, i.IsCompleted, i.ParentItemId, i.HasChildren, i.ChildrenCount, i.IncompleteChildrenCount, i.Level, isExpanded, i.Order, i.SortKey);
+            var vm = new ItemVm(i.Id, i.ListId, i.Name, i.IsCompleted, i.ParentItemId, i.HasChildren, i.ChildrenCount, i.IncompleteChildrenCount, i.Level, isExpanded, i.Order, i.SortKey, i.CompletedByUsername, i.LastActionUsername, i.LastActionCompleted);
             _allItems.Add(vm);
         }
         var byId = _allItems.ToDictionary(x => x.Id);
         foreach (var vm in _allItems)
-        {
             if (vm.ParentId != null && byId.TryGetValue(vm.ParentId.Value, out var parent)) parent.Children.Add(vm);
-        }
         foreach (var vm in _allItems) vm.RecalcState();
         _selectedItem = selectedId != null ? _allItems.FirstOrDefault(x => x.Id == selectedId.Value) : null;
         RebuildVisibleItems(); UpdateCompletedBadge();
         _lastRevision = await _db.GetListRevisionAsync(listId.Value);
         _isRefreshing = false;
+        _itemsLoaded = true;
         UpdateChildControls();
 #if WINDOWS
         RestorePageFocus();
@@ -916,9 +959,52 @@ public class DashboardPage : ContentPage, IQueryAttributable
 
     private void RebuildVisibleItems()
     {
-        _items.Clear(); var visible = new List<ItemVm>();
-        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.SortKey)) AddWithDescendants(root, visible);
-        foreach (var v in visible) _items.Add(v);
+        var newVisible = new List<ItemVm>();
+        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.SortKey)) AddWithDescendants(root, newVisible);
+        // If sequences identical (by Id) skip mutating collection to prevent flashing.
+        if (_items.Count == newVisible.Count)
+        {
+            bool same = true;
+            for (int i = 0; i < _items.Count; i++) { if (_items[i].Id != newVisible[i].Id) { same = false; break; } }
+            if (same)
+            {
+                // Still update selection state if needed
+                if (_selectedItem != null)
+                {
+                    var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
+                    if (current != null) SetSingleSelection(current); else ClearSelectionAndUi();
+                }
+                else ClearSelectionAndUi();
+                return;
+            }
+        }
+        // Minimal diff: remove items not present
+        var newIds = new HashSet<int>(newVisible.Select(v => v.Id));
+        for (int i = _items.Count - 1; i >= 0; i--)
+            if (!newIds.Contains(_items[i].Id)) _items.RemoveAt(i);
+        // Insert / reorder
+        for (int i = 0; i < newVisible.Count; i++)
+        {
+            if (i < _items.Count && _items[i].Id == newVisible[i].Id) continue;
+            var existingIndex = _items.ToList().FindIndex(x => x.Id == newVisible[i].Id);
+            if (existingIndex >= 0)
+            {
+                // Move existing to position i
+                if (existingIndex != i)
+                {
+                    var vm = _items[existingIndex];
+                    _items.RemoveAt(existingIndex);
+                    _items.Insert(i, vm);
+                }
+            }
+            else
+            {
+                _items.Insert(i, newVisible[i]);
+            }
+        }
+        // Trim tail if necessary
+        while (_items.Count > newVisible.Count) _items.RemoveAt(_items.Count - 1);
+
         if (_selectedItem != null)
         {
             var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
@@ -1058,7 +1144,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
         foreach (var it in _allItems)
             if (it.IsSelected) it.IsSelected = false;
         _selectedItem = vm;
-        if (vm != null) vm.IsSelected = true; // corrected syntax
+        if (vm != null) vm.IsSelected = true;
         UpdateMoveButtons();
         UpdateChildControls();
     }
@@ -1074,9 +1160,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private void NavigateSiblingSelection(int delta)
     {
         if (_selectedItem == null) return;
-        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId)
-                                 .OrderBy(x => x.SortKey)
-                                 .ToList();
+        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId).OrderBy(x => x.SortKey).ToList();
         var idx = siblings.FindIndex(x => x.Id == _selectedItem.Id);
         if (idx < 0) return;
         var newIdx = idx + delta;
@@ -1093,16 +1177,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
 
 #if WINDOWS
     private void RestorePageFocus()
-    {
-        try
-        {
-            if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe)
-            {
-                fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
-            }
-        }
-        catch { }
-    }
+    { try { if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe) { fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic); } } catch { } }
 #endif
 
     // Converters for inline rename (added if missing)
@@ -1118,4 +1193,21 @@ public class DashboardPage : ContentPage, IQueryAttributable
         public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => (value is bool b && b) ? TrueText : FalseText;
         public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
     }
+
+    private async Task RefreshSingleItemAsync(int itemId)
+    {
+        var listId = SelectedListId; if (listId == null) return;
+        var items = await _db.GetItemsAsync(listId.Value);
+        var updated = items.FirstOrDefault(i => i.Id == itemId);
+        if (updated == null) { await RefreshItemsAsync(); return; }
+        var vm = _allItems.FirstOrDefault(x => x.Id == itemId);
+        if (vm == null) { await RefreshItemsAsync(); return; }
+        vm.IsCompleted = updated.IsCompleted;
+        vm.CompletedByUsername = updated.CompletedByUsername;
+        vm.LastActionUsername = updated.LastActionUsername;
+        vm.LastActionCompleted = updated.LastActionCompleted;
+        vm.RecalcState();
+        RebuildVisibleItems();
+    }
+
 } // end DashboardPage class
