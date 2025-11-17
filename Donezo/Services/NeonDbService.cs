@@ -40,6 +40,9 @@ public interface INeonDbService
     Task<IDictionary<int, bool>> GetExpandedStatesAsync(int userId, int listId, CancellationToken ct = default);
     Task<(bool Ok, long NewRevision)> RenameItemAsync(int itemId, string newName, long expectedRevision, CancellationToken ct = default);
     Task<(bool Ok, long NewRevision, int Affected)> ResetSubtreeAsync(int rootItemId, long expectedRevision, CancellationToken ct = default);
+    // New: per-user per-list Hide Completed preference
+    Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default);
+    Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default);
 }
 
 public record ListRecord(int Id, string Name, bool IsDaily);
@@ -115,7 +118,7 @@ public class NeonDbService : INeonDbService
         if (_schemaEnsured) return;
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        var sql = @"create table if not exists users ( id serial primary key, username text not null unique, email text, first_name text, last_name text, password_hash text not null, password_salt text not null, created_at timestamptz not null default now()); create table if not exists lists ( id serial primary key, user_id int not null references users(id) on delete cascade, name text not null, created_at timestamptz not null default now(), constraint uq_lists_user_name unique(user_id,name)); create table if not exists items ( id serial primary key, list_id int not null references lists(id) on delete cascade, name text not null, is_completed boolean not null default false, created_at timestamptz not null default now()); alter table if exists lists add column if not exists is_daily boolean not null default false; alter table if exists lists add column if not exists last_reset_date date; alter table if exists items add column if not exists parent_item_id int references items(id) on delete cascade; alter table if exists items add column if not exists ""order"" int not null default 0; create index if not exists ix_items_list_parent_order on items(list_id, parent_item_id, ""order""); alter table if exists lists add column if not exists revision bigint not null default 0; create table if not exists user_prefs ( user_id int primary key references users(id) on delete cascade, theme_dark boolean not null default false ); create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null; create table if not exists item_ui_state ( user_id int not null references users(id) on delete cascade, item_id int not null references items(id) on delete cascade, expanded boolean not null default true, primary key(user_id,item_id));";
+        var sql = @"create table if not exists users ( id serial primary key, username text not null unique, email text, first_name text, last_name text, password_hash text not null, password_salt text not null, created_at timestamptz not null default now()); create table if not exists lists ( id serial primary key, user_id int not null references users(id) on delete cascade, name text not null, created_at timestamptz not null default now(), constraint uq_lists_user_name unique(user_id,name)); create table if not exists items ( id serial primary key, list_id int not null references lists(id) on delete cascade, name text not null, is_completed boolean not null default false, created_at timestamptz not null default now()); alter table if exists lists add column if not exists is_daily boolean not null default false; alter table if exists lists add column if not exists last_reset_date date; alter table if exists items add column if not exists parent_item_id int references items(id) on delete cascade; alter table if exists items add column if not exists ""order"" int not null default 0; create index if not exists ix_items_list_parent_order on items(list_id, parent_item_id, ""order""); alter table if exists lists add column if not exists revision bigint not null default 0; create table if not exists user_prefs ( user_id int primary key references users(id) on delete cascade, theme_dark boolean not null default false ); create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null; create table if not exists item_ui_state ( user_id int not null references users(id) on delete cascade, item_id int not null references items(id) on delete cascade, expanded boolean not null default true, primary key(user_id,item_id)); create table if not exists user_list_prefs ( user_id int not null references users(id) on delete cascade, list_id int not null references lists(id) on delete cascade, hide_completed boolean not null default false, updated_at timestamptz not null default now(), primary key(user_id,list_id) );";
         await using var cmd = new NpgsqlCommand(sql, conn);
         await cmd.ExecuteNonQueryAsync(ct);
         _schemaEnsured = true;
@@ -875,6 +878,33 @@ public class NeonDbService : INeonDbService
             await tx.CommitAsync(ct);
         }
         return (true, newRevision, affected);
+    }
+
+    // New: per-user per-list Hide Completed preference
+    public async Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("select hide_completed from user_list_prefs where user_id=@u and list_id=@l", conn);
+        cmd.Parameters.AddWithValue("u", userId);
+        cmd.Parameters.AddWithValue("l", listId);
+        var res = await cmd.ExecuteScalarAsync(ct);
+        if (res is null || res is DBNull) return null;
+        return (bool)res;
+    }
+
+    public async Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var sql = @"insert into user_list_prefs(user_id,list_id,hide_completed,updated_at) values(@u,@l,@h,now()) on conflict(user_id,list_id) do update set hide_completed=excluded.hide_completed, updated_at=excluded.updated_at";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("u", userId);
+        cmd.Parameters.AddWithValue("l", listId);
+        cmd.Parameters.AddWithValue("h", hideCompleted);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public static async Task StoreDevConnectionStringAsync(string connStr) => await SecureStorage.SetAsync("NEON_CONNECTION_STRING", connStr);
