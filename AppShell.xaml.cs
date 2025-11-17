@@ -18,8 +18,23 @@
                     // Navigate to dashboard with username in query
                     await GoToAsync($"//dashboard?username={Uri.EscapeDataString(username)}");
                 }
+                else
+                {
+                    // Ensure we land on login explicitly to avoid blank shell state
+                    await GoToAsync("//login");
+                }
             }
-            catch { /* ignore */ }
+            catch
+            {
+                // Fallback to login on any error
+                try { await GoToAsync("//login"); } catch { }
+            }
+        }
+
+        private async void OnResetAuthClicked(object sender, EventArgs e)
+        {
+            try { Microsoft.Maui.Storage.SecureStorage.Remove("AUTH_USERNAME"); } catch { }
+            try { await GoToAsync("//login"); } catch { }
         }
     }
 }

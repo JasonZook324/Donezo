@@ -6,6 +6,10 @@
     xmlns:pages="clr-namespace:Donezo.Pages"
     Title="Donezo">
 
+    <Shell.ToolbarItems>
+        <ToolbarItem Text="Reset" Order="Primary" Priority="0" Clicked="OnResetAuthClicked" />
+    </Shell.ToolbarItems>
+
     <TabBar>
         <ShellContent
             Title="Login"
