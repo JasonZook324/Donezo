@@ -158,6 +158,12 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private Entry _newChildEntry = null!;
     private Button _addChildButton = null!;
 
+    // Hide Completed filter state/UI
+    private bool _hideCompleted;
+    private Switch _hideCompletedSwitch = null!;
+    private bool _suppressHideCompletedEvent;
+    private Label _emptyFilteredLabel = null!;
+
     private readonly ObservableCollection<ItemVm> _items = new();
     private List<ItemVm> _allItems = new();
     private IReadOnlyList<ListRecord> _lists = Array.Empty<ListRecord>();
@@ -309,6 +315,21 @@ public class DashboardPage : ContentPage, IQueryAttributable
         _themeSwitch = new Switch();
         _themeSwitch.Toggled += async (s, e) => await OnThemeToggledAsync(e.Value);
         var themeRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } };
+
+        // Hide Completed control
+        _hideCompletedSwitch = new Switch();
+        _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value);
+        var hideCompletedRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } };
+
+        // Placeholder when filter hides everything
+        _emptyFilteredLabel = new Label
+        {
+            Text = "All items are completed and hidden.",
+            Opacity = 0.7,
+            IsVisible = false,
+            HorizontalTextAlignment = TextAlignment.Center,
+            Margin = new Thickness(0, 6)
+        };
 
         _listsCard = new Border
         {
@@ -491,6 +512,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
                         return;
                     }
                     ir.IsCompleted = e.Value; UpdateParentStates(ir); UpdateCompletedBadge();
+                    if (_hideCompleted) RebuildVisibleItems();
                 }
             };
             var partialIndicator = new Label { TextColor = Colors.Orange, FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center, HorizontalTextAlignment = TextAlignment.Center, FontSize = 14, WidthRequest = 12 };
@@ -657,6 +679,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 Children =
                 {
                     itemsHeader,
+                    hideCompletedRow,
+                    _emptyFilteredLabel,
                     _itemsView,
                     new HorizontalStackLayout { Spacing = 8, Children = { _newItemEntry, _addItemButton } },
                     new HorizontalStackLayout { Spacing = 8, Children = { _newChildEntry, _addChildButton } } // child creation row
@@ -831,12 +855,21 @@ public class DashboardPage : ContentPage, IQueryAttributable
         return false;
     }
 
-    // Recursive visible population
+    // Recursive visible population (unfiltered)
     private void AddWithDescendants(ItemVm node, List<ItemVm> target)
     {
         target.Add(node);
         if (!node.IsExpanded) return;
         foreach (var child in node.Children.OrderBy(c => c.SortKey)) AddWithDescendants(child, target);
+    }
+
+    // Filtered population: skip completed nodes entirely when hiding
+    private void AddWithDescendantsFiltered(ItemVm node, List<ItemVm> target)
+    {
+        if (_hideCompleted && node.IsCompleted) return;
+        target.Add(node);
+        if (!node.IsExpanded) return;
+        foreach (var child in node.Children.OrderBy(c => c.SortKey)) AddWithDescendantsFiltered(child, target);
     }
 
     private void ApplyResponsiveLayout(double width)
@@ -901,10 +934,17 @@ public class DashboardPage : ContentPage, IQueryAttributable
         var byId = _allItems.ToDictionary(x => x.Id);
         foreach (var vm in _allItems)
         {
-            if (vm.ParentId != null && byId.TryGetValue(vm.ParentId.Value, out var parent)) parent.Children.Add(vm);
+            if (vm.ParentId != null)
+            {
+                if (byId.TryGetValue(vm.ParentId.Value, out var p))
+                {
+                    p.Children.Add(vm);
+                }
+            }
         }
         foreach (var vm in _allItems) vm.RecalcState();
         _selectedItem = selectedId != null ? _allItems.FirstOrDefault(x => x.Id == selectedId.Value) : null;
+        await LoadHideCompletedPreferenceForSelectedListAsync();
         RebuildVisibleItems(); UpdateCompletedBadge();
         _lastRevision = await _db.GetListRevisionAsync(listId.Value);
         _isRefreshing = false;
@@ -917,18 +957,52 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private void RebuildVisibleItems()
     {
         _items.Clear(); var visible = new List<ItemVm>();
-        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.SortKey)) AddWithDescendants(root, visible);
+        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.SortKey))
+        {
+            if (_hideCompleted) AddWithDescendantsFiltered(root, visible);
+            else AddWithDescendants(root, visible);
+        }
         foreach (var v in visible) _items.Add(v);
+
+        // Update placeholder visibility
+        if (_emptyFilteredLabel != null)
+        {
+            _emptyFilteredLabel.IsVisible = _hideCompleted && visible.Count == 0 && _allItems.Any();
+            if (_emptyFilteredLabel.IsVisible)
+            {
+                var hiddenCount = _allItems.Count(i => i.IsCompleted);
+                _emptyFilteredLabel.Text = hiddenCount > 0
+                    ? $"All {hiddenCount} items are completed and hidden."
+                    : "All items are completed and hidden.";
+            }
+        }
+
         if (_selectedItem != null)
         {
-            var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
-            if (current != null) SetSingleSelection(current); else ClearSelectionAndUi();
+            // If selected item is hidden by filter, clear selection
+            if (!visible.Any(x => x.Id == _selectedItem.Id))
+            {
+                ClearSelectionAndUi();
+            }
+            else
+            {
+                var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
+                if (current != null) SetSingleSelection(current); else ClearSelectionAndUi();
+            }
         }
         else ClearSelectionAndUi();
     }
 
     private static int ComputeBetweenOrder(int? prev, int? next)
-    { if (prev.HasValue && next.HasValue) return prev.Value + Math.Max(1, (next.Value - prev.Value) / 2); if (prev.HasValue) return prev.Value + 1; if (next.HasValue) return next.Value - 1; return 0; }
+    {
+        if (prev.HasValue && next.HasValue)
+            return prev.Value + Math.Max(1, (next.Value - prev.Value) / 2);
+        if (prev.HasValue)
+            return prev.Value + 1;
+        if (next.HasValue)
+            return next.Value - 1;
+        return 0;
+    }
 
     private async Task AddItemAsync()
     { var listId = SelectedListId; if (listId == null) return; var name = _newItemEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.AddItemAsync(listId.Value, name); _newItemEntry.Text = string.Empty; await RefreshItemsAsync(); }
@@ -1058,7 +1132,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
         foreach (var it in _allItems)
             if (it.IsSelected) it.IsSelected = false;
         _selectedItem = vm;
-        if (vm != null) vm.IsSelected = true; // corrected syntax
+        if (vm != null)
+            vm.IsSelected = true;
         UpdateMoveButtons();
         UpdateChildControls();
     }
@@ -1117,5 +1192,33 @@ public class DashboardPage : ContentPage, IQueryAttributable
         public string FalseText { get; set; } = string.Empty;
         public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => (value is bool b && b) ? TrueText : FalseText;
         public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
+    }
+
+    private async Task LoadHideCompletedPreferenceForSelectedListAsync()
+    {
+        var listId = SelectedListId; if (listId == null || _userId == null) return;
+        bool? server = null;
+        try { server = await _db.GetListHideCompletedAsync(_userId.Value, listId.Value); } catch { }
+        bool value = server ?? Preferences.Get($"LIST_HIDE_COMPLETED_{listId.Value}", false);
+        _suppressHideCompletedEvent = true;
+        _hideCompleted = value;
+        if (_hideCompletedSwitch != null) _hideCompletedSwitch.IsToggled = value;
+        _suppressHideCompletedEvent = false;
+    }
+
+    private async Task OnHideCompletedToggledAsync(bool hide)
+    {
+        if (_suppressHideCompletedEvent) return;
+        _hideCompleted = hide;
+        var listId = SelectedListId;
+        if (listId != null)
+        {
+            Preferences.Set($"LIST_HIDE_COMPLETED_{listId.Value}", hide);
+            if (_userId != null)
+            {
+                try { await _db.SetListHideCompletedAsync(_userId.Value, listId.Value, hide); } catch { }
+            }
+        }
+        RebuildVisibleItems();
     }
 } // end DashboardPage class
