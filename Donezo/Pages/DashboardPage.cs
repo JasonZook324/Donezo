@@ -118,7 +118,8 @@ public class ItemVm : BindableObject
     public string PartialGlyph => CompletionState == CompletionVisualState.Partial ? "-" : string.Empty;
     public string ExpandGlyph => HasChildren ? (_isExpanded ? "v" : ">") : string.Empty;
 
-    public string? LastActionUsername { get; set; }
+    private string? _lastActionUsername;
+    public string? LastActionUsername { get => _lastActionUsername; set { if (_lastActionUsername == value) return; _lastActionUsername = value; OnPropertyChanged(nameof(LastActionUsername)); } }
 
     public ItemVm(int id, int listId, string name, bool isCompleted, int? parentId, bool hasChildren, int childrenCount, int incompleteChildrenCount, int level, bool isExpanded, int order, string sortKey)
     {
