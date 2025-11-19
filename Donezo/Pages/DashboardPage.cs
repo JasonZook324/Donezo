@@ -137,53 +137,21 @@ public class ItemVm : BindableObject
     }
 }
 
-public class DashboardPage : ContentPage, IQueryAttributable
+public partial class DashboardPage : ContentPage, IQueryAttributable
 {
     private INeonDbService _db;
     private string _username = string.Empty;
     private int? _userId;
-    // REPLACED: private Picker _listsPicker = null!;
-    private CollectionView _listsView = null!; // new list selection view
-    private readonly ObservableCollection<ListRecord> _listsObservable = new();
-    private int? _selectedListId; // replaces picker SelectedItem
-    private Entry _newListEntry = null!;
-    private CheckBox _dailyCheck = null!;
-    private Button _createListButton = null!;
-    private Button _deleteListButton = null!;
-    private Button _resetListButton = null!;
-    private CollectionView _itemsView = null!;
-    private Entry _newItemEntry = null!;
-    private Button _addItemButton = null!;
+
     private Switch _themeSwitch = null!; // light/dark toggle
     private Label _themeLabel = null!;
     private Label _headerTitle = null!;
-    // Child creation controls (new)
-    private Entry _newChildEntry = null!;
-    private Button _addChildButton = null!;
 
     // Hide Completed filter state/UI
     private bool _hideCompleted;
-    private Switch _hideCompletedSwitch = null!;
     private bool _suppressHideCompletedEvent;
-    private Label _emptyFilteredLabel = null!;
 
-    private readonly ObservableCollection<ItemVm> _items = new();
-    private List<ItemVm> _allItems = new();
-    private IReadOnlyList<ListRecord> _lists = Array.Empty<ListRecord>();
-    private Dictionary<int, bool> _expandedStates = new();
-    private ItemVm? _dragItem;
-    private ItemVm? _pendingDragVm; // track drag start awaiting drop
-    private bool _dragDropCompleted; // flag set true when a drop handler runs
-    private ItemVm? _holdItem; // item currently pressed
-    private CancellationTokenSource? _holdCts; // timer for drag engage
-    private bool _dragGestureActive; // true during active drag
-    private ItemVm? _selectedItem; // currently selected item for keyboard/accessibility moves
-
-    private readonly Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8, 2), IsVisible = false, FontAttributes = FontAttributes.Bold };
-
-    private bool _suppressDailyEvent;
-    private bool _suppressThemeEvent;
-    private bool _initialized;
+    private int? _selectedListId; // selection moved to Lists partial, kept for property continuity
     private int? SelectedListId => _selectedListId;
 
     // Responsive layout fields
@@ -199,31 +167,17 @@ public class DashboardPage : ContentPage, IQueryAttributable
     // Hover auto-expand timers
     private readonly Dictionary<int, CancellationTokenSource> _hoverExpandCts = new();
 
-    private DataTemplate? _itemViewTemplate; // for custom item template
+    private ItemVm? _dragItem;
+    private ItemVm? _pendingDragVm; // track drag start awaiting drop
+    private bool _dragDropCompleted; // flag set true when a drop handler runs
+    private ItemVm? _holdItem; // item currently pressed
+    private CancellationTokenSource? _holdCts; // timer for drag engage
+    private bool _dragGestureActive; // true during active drag
+    private ItemVm? _selectedItem; // currently selected item for keyboard/accessibility moves
 
-    // List visual helper methods (inserted)
-    private readonly List<Border> _listItemBorders = new(); // track list item borders for visual refresh
-    private void ApplyListVisual(Border b)
-    {
-        if (b.BindingContext is ListRecord lr)
-        {
-            var primary = (Color)Application.Current!.Resources["Primary"];
-            var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
-            var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
-            bool selected = _selectedListId == lr.Id;
-            b.BackgroundColor = selected ? primary.WithAlpha(0.12f) : baseBg;
-            b.Stroke = selected ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
-        }
-    }
-    private void UpdateAllListSelectionVisuals()
-    {
-        foreach (var b in _listItemBorders)
-        {
-            ApplyListVisual(b);
-        }
-    }
-    // Replace previous UpdateAllListVisuals logic
-    private void UpdateAllListVisuals() => UpdateAllListSelectionVisuals();
+    private bool _suppressDailyEvent;
+    private bool _suppressThemeEvent;
+    private bool _initialized;
 
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
@@ -238,7 +192,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
         SizeChanged += (_, _) => ApplyResponsiveLayout(Width);
         Application.Current!.RequestedThemeChanged += (_, __) =>
         {
-            // Force rebind so theme-aware converters re-evaluate consistently
             MainThread.BeginInvokeOnMainThread(RebuildVisibleItems);
         };
     }
@@ -318,449 +271,14 @@ public class DashboardPage : ContentPage, IQueryAttributable
 
     private void BuildUi()
     {
-        // LISTS PANEL --------------------------------------------------
-        _newListEntry = new Entry { Placeholder = "New list name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
-        _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
-        _dailyCheck.CheckedChanged += async (s, e) => await OnDailyToggledAsync(e.Value);
-        var dailyRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Daily" }, _dailyCheck } };
-        _createListButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
-        _createListButton.Clicked += async (_, _) => await CreateListAsync();
-        _deleteListButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
-        _deleteListButton.Clicked += async (_, _) => await DeleteCurrentListAsync();
-        _resetListButton = new Button { Text = "Reset", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _resetListButton.Clicked += async (_, _) => await ResetCurrentListAsync();
-
-        // NEW: Instantiate previously null UI controls (preferences + items + child creation + filter placeholder)
+        // Preferences controls
         _themeLabel = new Label { Text = "Light", VerticalTextAlignment = TextAlignment.Center };
         _themeSwitch = new Switch();
         _themeSwitch.Toggled += async (s, e) => await OnThemeToggledAsync(e.Value);
 
-        _hideCompletedSwitch = new Switch();
-        _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value);
-
-        _emptyFilteredLabel = new Label { IsVisible = false, TextColor = Colors.Gray, FontSize = 12 };
-
-        _newItemEntry = new Entry { Placeholder = "New item name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
-        _newItemEntry.TextChanged += (s, e) => { if (_addItemButton != null) _addItemButton.IsEnabled = !string.IsNullOrWhiteSpace(_newItemEntry.Text); };
-        _addItemButton = new Button { Text = "Add", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false };
-        _addItemButton.Clicked += async (_, __) => await AddItemAsync();
-
-        _newChildEntry = new Entry { Placeholder = "New child name", Style = (Style)Application.Current!.Resources["FilledEntry"], IsVisible = false };
-        _newChildEntry.TextChanged += (s, e) => UpdateChildControls();
-        _addChildButton = new Button { Text = "Add Child", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false, IsVisible = false };
-        _addChildButton.Clicked += async (_, __) => await AddChildItemAsync();
-
-        _listsView = new CollectionView
-        {
-            SelectionMode = SelectionMode.Single,
-            ItemsSource = _listsObservable,
-            ItemTemplate = new DataTemplate(() =>
-            {
-                var border = new Border
-                {
-                    StrokeThickness = 1,
-                    StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(12) },
-                    Padding = new Thickness(10,6),
-                    Margin = new Thickness(0,4)
-                };
-                var name = new Label { FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center };
-                name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
-                var daily = new Border { BackgroundColor = (Color)Application.Current!.Resources["Primary"], StrokeThickness = 0, Padding = new Thickness(6,2), StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }, Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White } };
-                daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
-                var shareBtn = new Button { Text = "Share", FontSize = 12, Padding = new Thickness(10,4), Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-                shareBtn.Clicked += async (s,e)=>{
-                    if (border.BindingContext is ListRecord lr)
-                    {
-                        await OpenShareAsync(lr);
-                    }
-                };
-                var tapSelect = new TapGestureRecognizer();
-                tapSelect.Tapped += (s,e)=>{
-                    if (border.BindingContext is ListRecord lr)
-                    {
-                        if (_selectedListId == lr.Id) return;
-                        _selectedListId = lr.Id;
-                        UpdateAllListVisuals();
-                        _ = RefreshItemsAsync();
-                        SyncDailyCheckboxWithSelectedList();
-                        if (_listsView != null) _listsView.SelectedItem = lr;
-                    }
-                };
-                border.GestureRecognizers.Add(tapSelect);
-                border.Content = new HorizontalStackLayout { Spacing = 8, Children = { name, daily, shareBtn } };
-                border.BindingContextChanged += (s,e)=> {
-                    if (!_listItemBorders.Contains(border)) _listItemBorders.Add(border);
-                    ApplyListVisual(border);
-                };
-                return border;
-            })
-        };
-        _listsView.SelectionChanged += async (s, e) =>
-        {
-            var lr = e.CurrentSelection.FirstOrDefault() as ListRecord;
-            if (lr == null) return;
-            if (_selectedListId == lr.Id) return; // already selected
-            _selectedListId = lr.Id;
-            UpdateAllListVisuals();
-            await RefreshItemsAsync();
-            SyncDailyCheckboxWithSelectedList();
-        };
-
-        var listsHeader = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
-        listsHeader.Add(new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] });
-        listsHeader.Add(_completedBadge, 1, 0);
-
-        _listsCard = new Border
-        {
-            StrokeThickness = 1,
-            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) },
-            Content = new VerticalStackLayout
-            {
-                Spacing = 12,
-                Padding = 16,
-                Children =
-                {
-                    listsHeader,
-                    _listsView,
-                    dailyRow,
-                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton, _resetListButton } }
-                }
-            }
-        };
-        _listsCard.Style = (Style)Application.Current!.Resources["CardBorder"];
-
-        // ITEMS PANEL (existing code retained) ----------------------
-        // Reusable template that binds background/stroke via converters so it tracks theme
-        _itemViewTemplate = new DataTemplate(() =>
-        {
-            var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) }, Padding = new Thickness(0) };
-            card.SetBinding(Border.OpacityProperty, new Binding(nameof(ItemVm.IsDragging), converter: new BoolToOpacityConverter()));
-
-            Action<ItemVm> applyStyle = vm =>
-            {
-                var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
-                var defaultBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
-                var defaultStroke = (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
-                if (vm.IsDragging)
-                {
-                    card.BackgroundColor = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.18f);
-                    card.Opacity = 0.75; card.Stroke = (Color)Application.Current!.Resources["Primary"]; return;
-                }
-                if (vm.IsPreDrag)
-                {
-                    card.BackgroundColor = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.12f);
-                    card.Opacity = 0.9; card.Stroke = defaultStroke; return;
-                }
-                if (vm.IsSelected)
-                {
-                    card.BackgroundColor = defaultBg;
-                    card.Opacity = 1.0; card.Stroke = (Color)Application.Current!.Resources["Primary"]; return;
-                }
-                card.BackgroundColor = defaultBg; card.Opacity = 1.0; card.Stroke = defaultStroke;
-            };
-
-            Color zoneHover = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.15f);
-            double GetInsertionGapHeight()
-            {
-                try
-                {
-                    var info = DeviceDisplay.Current.MainDisplayInfo;
-                    var widthDp = info.Width / info.Density;
-                    var rowH = card.Height; if (rowH <= 0) rowH = 56;
-                    double cap = widthDp < 380 ? 20 : (widthDp < 600 ? 28 : 36);
-                    double min = 12; double target = Math.Min(rowH * 0.55, cap); if (target < min) target = min; return target;
-                }
-                catch { return 20; }
-            }
-
-            // External gap borders (separate from card border)
-            var bottomGap = new Border
-            {
-                HeightRequest = 4,
-                BackgroundColor = Colors.Transparent,
-                StrokeThickness = 1,
-                Stroke = Colors.Transparent,
-                StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) },
-                Padding = 0,
-                Margin = new Thickness(0, 2, 0, 0)
-            };
-            var bottomDrop = new DropGestureRecognizer();
-            bottomDrop.DragOver += (_, __) =>
-            {
-                if (_dragItem == null) return;
-                bottomGap.HeightRequest = GetInsertionGapHeight();
-                bottomGap.BackgroundColor = zoneHover;
-                bottomGap.Stroke = (Color)Application.Current!.Resources["Primary"]; // outline
-            };
-            bottomDrop.DragLeave += (_, __) => { bottomGap.HeightRequest = 4; bottomGap.BackgroundColor = Colors.Transparent; bottomGap.Stroke = Colors.Transparent; };
-            bottomDrop.Drop += async (s, e) => { bottomGap.HeightRequest = 4; bottomGap.BackgroundColor = Colors.Transparent; bottomGap.Stroke = Colors.Transparent; if (((BindableObject)card).BindingContext is ItemVm target) await SafeHandleDropAsync(target, "below"); };
-            bottomGap.GestureRecognizers.Add(bottomDrop);
-
-            // Inner item grid
-            var grid = new Grid
-            {
-                Padding = new Thickness(4, 4),
-                ColumnDefinitions = new ColumnDefinitionCollection
-                {
-                    new ColumnDefinition(GridLength.Auto),
-                    new ColumnDefinition(GridLength.Auto),
-                    new ColumnDefinition(GridLength.Star),
-                    new ColumnDefinition(GridLength.Auto),
-                    new ColumnDefinition(GridLength.Auto),
-                    new ColumnDefinition(GridLength.Auto), // rename/save
-                    new ColumnDefinition(GridLength.Auto)  // cancel
-                }
-            };
-
-            // badge
-            var badge = new Label { Margin = new Thickness(4, 0), VerticalTextAlignment = TextAlignment.Center, FontAttributes = FontAttributes.Bold };
-            badge.SetBinding(Label.TextProperty, new Binding(".", converter: new LevelBadgeConverter()));
-            badge.SetBinding(Label.TextColorProperty, new Binding(".", converter: new LevelAccentColorConverter()));
-            grid.Add(badge, 0, 0);
-
-            void OnDragStarting(object? s, DragStartingEventArgs e)
-            {
-                if (((BindableObject)card).BindingContext is ItemVm vm)
-                {
-                    _holdCts?.Cancel();
-                    vm.IsPreDrag = false; vm.IsDragging = true; applyStyle(vm);
-                    _dragItem = vm; _pendingDragVm = vm; _dragDropCompleted = false;
-                    try { e.Data.Properties["ItemId"] = vm.Id; } catch { }
-                }
-            }
-            var drag = new DragGestureRecognizer { CanDrag = true }; drag.DragStarting += OnDragStarting; card.GestureRecognizers.Add(drag);
-            var dragOnGrid = new DragGestureRecognizer { CanDrag = true }; dragOnGrid.DragStarting += OnDragStarting; grid.GestureRecognizers.Add(dragOnGrid);
-
-            // expand icon
-            var expandIcon = new Label { Text = ">", WidthRequest = 28, HeightRequest = 28, HorizontalTextAlignment = TextAlignment.Center, VerticalTextAlignment = TextAlignment.Center };
-            expandIcon.SetBinding(Label.RotationProperty, new Binding(nameof(ItemVm.IsExpanded), converter: new BoolToRotationConverter()));
-            expandIcon.SetBinding(SemanticProperties.DescriptionProperty, new Binding(nameof(ItemVm.IsExpanded), converter: new BoolToAccessibleExpandNameConverter()));
-            expandIcon.SetBinding(View.IsVisibleProperty, new Binding(nameof(ItemVm.HasChildren)));
-            var expandTap = new TapGestureRecognizer();
-            expandTap.Tapped += async (s, e) => {
-                if (((BindableObject)s).BindingContext is ItemVm vm) {
-                    if (!vm.HasChildren) return;
-                    bool collapsing = vm.IsExpanded;
-                    vm.IsExpanded = !vm.IsExpanded;
-                    if (collapsing && _selectedItem != null && IsUnder(vm, _selectedItem))
-                    {
-                        SetSingleSelection(vm);
-                    }
-                    else
-                    {
-                        if (_selectedItem != null)
-                        {
-                            var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
-                            if (current != null) SetSingleSelection(current); else ClearSelectionAndUi();
-                        }
-                        else ClearSelectionAndUi();
-                    }
-                    if (_userId != null) await _db.SetItemExpandedAsync(_userId.Value, vm.Id, vm.IsExpanded);
-                    RebuildVisibleItems();
-                }
-            };
-            expandIcon.GestureRecognizers.Add(expandTap);
-            grid.Add(expandIcon, 1, 0);
-
-            // Name label and inline entry
-            var nameContainer = new Grid();
-            var nameLabel = new Label { VerticalTextAlignment = TextAlignment.Center };
-            nameLabel.SetBinding(Label.TextProperty, nameof(ItemVm.Name));
-            nameLabel.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
-            nameLabel.SetBinding(View.IsVisibleProperty, new Binding(nameof(ItemVm.IsRenaming), converter: new InvertBoolConverter()));
-            var nameEntry = new Entry { HeightRequest = 32, FontSize = 14 };
-            nameEntry.SetBinding(Entry.TextProperty, nameof(ItemVm.EditableName), BindingMode.TwoWay);
-            nameEntry.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
-            nameEntry.SetBinding(View.IsVisibleProperty, nameof(ItemVm.IsRenaming));
-            nameContainer.Add(nameLabel); nameContainer.Add(nameEntry);
-            var dragOnName = new DragGestureRecognizer { CanDrag = true }; dragOnName.DragStarting += OnDragStarting; nameContainer.GestureRecognizers.Add(dragOnName);
-            grid.Add(nameContainer, 2, 0);
-
-            // status + checkbox
-            var statusStack = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, ColumnSpacing = 4 };
-            var check = new CheckBox { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
-            check.SetBinding(CheckBox.IsCheckedProperty, nameof(ItemVm.IsCompleted));
-            check.CheckedChanged += async (s, e) =>
-            {
-                if (((BindableObject)s).BindingContext is ItemVm ir)
-                {
-                    var ok = await _db.SetItemCompletedAsync(ir.Id, e.Value);
-                    if (!ok)
-                    {
-                        await DisplayAlert("Blocked", "Parent cannot be completed until all direct children are complete.", "OK");
-                        await RefreshItemsAsync();
-                        return;
-                    }
-                    ir.IsCompleted = e.Value; UpdateParentStates(ir); UpdateCompletedBadge();
-                    if (_hideCompleted) RebuildVisibleItems();
-                }
-            };
-            var partialIndicator = new Label { TextColor = Colors.Orange, FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center, HorizontalTextAlignment = TextAlignment.Center, FontSize = 14, WidthRequest = 12 };
-            partialIndicator.SetBinding(Label.TextProperty, nameof(ItemVm.PartialGlyph));
-            statusStack.Add(check, 0, 0); statusStack.Add(partialIndicator, 1, 0);
-            grid.Add(statusStack, 3, 0);
-
-            // delete button
-            var deleteBtn = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red, FontSize = 12, Padding = new Thickness(6, 2), MinimumWidthRequest = 52 };
-            deleteBtn.Clicked += async (s, e) =>
-            {
-                if (((BindableObject)s).BindingContext is ItemVm ir)
-                {
-                    var listId = SelectedListId; if (listId == null) return;
-                    var expectedRevision = await _db.GetListRevisionAsync(listId.Value);
-                    var result = await _db.DeleteItemAsync(ir.Id, expectedRevision);
-                    if (result.Ok) { _allItems.Remove(ir); RebuildVisibleItems(); UpdateCompletedBadge(); }
-                    else { await RefreshItemsAsync(); }
-                }
-            };
-            grid.Add(deleteBtn, 4, 0);
-
-            // Inline rename: toggle/save
-            var renameBtn = new Button { Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, Padding = new Thickness(6,2), MinimumWidthRequest = 64 };
-            renameBtn.SetBinding(Button.TextProperty, new Binding(nameof(ItemVm.IsRenaming), converter: new BoolToStringConverter { TrueText = "Save", FalseText = "Rename" }));
-            renameBtn.Clicked += async (s,e)=>
-            {
-                if (((BindableObject)s).BindingContext is ItemVm vm)
-                {
-                    if (!vm.IsRenaming)
-                    {
-                        vm.EditableName = vm.Name; vm.IsRenaming = true;
-                    }
-                    else
-                    {
-                        var newName = vm.EditableName?.Trim();
-                        if (string.IsNullOrWhiteSpace(newName) || newName == vm.Name) { vm.IsRenaming = false; return; }
-                        try
-                        {
-                            var rev = await _db.GetListRevisionAsync(vm.ListId);
-                            var res = await _db.RenameItemAsync(vm.Id, newName, rev);
-                            if (!res.Ok) { await DisplayAlert("Rename", "Concurrency mismatch; items refreshed.", "OK"); await RefreshItemsAsync(); return; }
-                            vm.Name = newName; vm.IsRenaming = false; // local update for immediate UI
-                        }
-                        catch (Exception ex)
-                        { await DisplayAlert("Rename Failed", ex.Message, "OK"); await RefreshItemsAsync(); }
-                    }
-                }
-            };
-            grid.Add(renameBtn, 5, 0);
-
-            var cancelBtn = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, Padding = new Thickness(6,2), MinimumWidthRequest = 56 };
-            cancelBtn.SetBinding(View.IsVisibleProperty, nameof(ItemVm.IsRenaming));
-            cancelBtn.Clicked += (s,e)=>
-            {
-                if (((BindableObject)s).BindingContext is ItemVm vm)
-                { vm.IsRenaming = false; vm.EditableName = vm.Name; }
-            };
-            grid.Add(cancelBtn, 6, 0);
-
-            // Drop into (mid) stays on grid
-            var midDrop = new DropGestureRecognizer();
-            midDrop.DragOver += (s, e) => { grid.BackgroundColor = zoneHover; if (((BindableObject)card).BindingContext is ItemVm vm && vm.HasChildren && !vm.IsExpanded) { ScheduleHoverExpand(vm); } };
-            midDrop.DragLeave += (s, e) => { grid.BackgroundColor = Colors.Transparent; if (((BindableObject)card).BindingContext is ItemVm vm) CancelHoverExpand(vm); };
-            midDrop.Drop += async (s, e) => { grid.BackgroundColor = Colors.Transparent; if (((BindableObject)card).BindingContext is ItemVm target) { CancelHoverExpand(target.Id); await SafeHandleDropAsync(target, "into"); } };
-            grid.GestureRecognizers.Add(midDrop);
-
-            card.Content = grid;
-            card.Style = (Style)Application.Current!.Resources["CardBorder"];
-            card.BindingContextChanged += (s, e) =>
-            {
-                if (s is Border b)
-                {
-                    // Detach previous handler if any
-                    if (b.GetValue(TrackedVmProperty) is ItemVm oldVm && b.GetValue(TrackedHandlerProperty) is PropertyChangedEventHandler oldHandler)
-                    {
-                        try { oldVm.PropertyChanged -= oldHandler; } catch { }
-                    }
-                    if (b.BindingContext is ItemVm vm)
-                    {
-                        applyStyle(vm);
-                        PropertyChangedEventHandler handler = (sender, args) =>
-                        {
-                            if (args.PropertyName == nameof(ItemVm.IsDragging) || args.PropertyName == nameof(ItemVm.IsPreDrag) || args.PropertyName == nameof(ItemVm.IsSelected))
-                            {
-                                applyStyle(vm);
-                            }
-                        };
-                        vm.PropertyChanged += handler;
-                        b.SetValue(TrackedVmProperty, vm);
-                        b.SetValue(TrackedHandlerProperty, handler);
-                    }
-                }
-            };
-
-            var pointer = new PointerGestureRecognizer(); card.GestureRecognizers.Add(pointer);
-            pointer.PointerPressed += (s, e) =>
-            {
-                if (card.BindingContext is ItemVm vm)
-                {
-                    SetSingleSelection(vm);
-                    _holdCts?.Cancel(); _holdCts = new CancellationTokenSource(); var token = _holdCts.Token; var localVm = vm;
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await Task.Delay(500, token);
-                            if (token.IsCancellationRequested) return;
-                            if (_selectedItem == localVm && !localVm.IsDragging)
-                            {
-                                MainThread.BeginInvokeOnMainThread(() =>
-                                {
-                                    localVm.IsDragging = true; _dragItem = localVm; _pendingDragVm = localVm; _dragDropCompleted = false;
-                                });
-                            }
-                        }
-                        catch { }
-                    });
-                }
-            };
-            pointer.PointerReleased += (s, e) => { _holdCts?.Cancel(); };
-            var tap = new TapGestureRecognizer(); tap.Tapped += (s,e)=>{ /* selection handled by pointer */ }; card.GestureRecognizers.Add(tap);
-
-            // Root layout combines external gaps and card
-            var root = new VerticalStackLayout { Spacing = 0, Children = { card, bottomGap } };
-            return root;
-        });
-
-        _itemsView = new CollectionView
-        {
-            ItemsSource = _items,
-            SelectionMode = SelectionMode.None,
-            ItemTemplate = _itemViewTemplate
-        };
-
-        // Add move controls for accessibility
-        _moveUpButton = new Button { Text = "Move Up", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, IsEnabled = false };
-        _moveUpButton.Clicked += async (_, __) => await MoveSelectedAsync(-1);
-        _moveDownButton = new Button { Text = "Move Down", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, IsEnabled = false };
-        _moveDownButton.Clicked += async (_, __) => await MoveSelectedAsync(1);
-        _resetSubtreeButton = new Button { Text = "Reset Subtree", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, IsEnabled = false };
-        _resetSubtreeButton.Clicked += async (_, __) => await ResetSelectedSubtreeAsync();
-        Dispatcher.StartTimer(TimeSpan.FromMilliseconds(400), () =>
-        {
-            UpdateMoveButtons();
-            return true; // keep running
-        });
-        var itemsHeader = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Items", Style = (Style)Application.Current!.Resources["SectionTitle"] }, _moveUpButton, _moveDownButton, _resetSubtreeButton } };
-
-        _itemsCard = new Border
-        {
-            StrokeThickness = 1,
-            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) },
-            Content = new VerticalStackLayout
-            {
-                Spacing = 12,
-                Padding = 16,
-                Children =
-                {
-                    itemsHeader,
-                    _emptyFilteredLabel,
-                    _itemsView,
-                    new HorizontalStackLayout { Spacing = 8, Children = { _newItemEntry, _addItemButton } },
-                    new HorizontalStackLayout { Spacing = 8, Children = { _newChildEntry, _addChildButton } } // child creation row
-                }
-            }
-        };
-        _itemsCard.Style = (Style)Application.Current!.Resources["CardBorder"]; // after creation
+        // Build list & item panels via partial helpers
+        _listsCard = BuildListsCard();
+        _itemsCard = BuildItemsCard();
 
         var prefsCard = new Border
         {
@@ -774,7 +292,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 {
                     new Label { Text = "Preferences", Style = (Style)Application.Current!.Resources["SectionTitle"] },
                     new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } },
-                    new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } }
+                    BuildHideCompletedPreferenceRow() // partial helper builds hide completed row
                 }
             }
         };
@@ -789,9 +307,35 @@ public class DashboardPage : ContentPage, IQueryAttributable
         Content = root; ApplyResponsiveLayout(Width);
     }
 
+    private void ApplyResponsiveLayout(double width)
+    {
+        if (_twoPaneGrid == null) return;
+        const double threshold = 900;
+        _twoPaneGrid.ColumnDefinitions.Clear(); _twoPaneGrid.RowDefinitions.Clear();
+        if (width >= threshold)
+        { _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); Grid.SetColumn(_listsCard, 0); Grid.SetRow(_listsCard, 0); Grid.SetColumn(_itemsCard, 1); Grid.SetRow(_itemsCard, 0); }
+        else
+        { _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); Grid.SetColumn(_listsCard, 0); Grid.SetRow(_listsCard, 0); Grid.SetColumn(_itemsCard, 0); Grid.SetRow(_itemsCard, 1); }
+    }
+
+    private async Task InitializeAsync()
+    { if (_initialized) return; _initialized = true; _userId = await _db.GetUserIdAsync(_username); if (_userId == null) { await DisplayAlert("Error", "User not found.", "OK"); return; } await LoadThemePreferenceAsync(); await RefreshListsAsync(); }
+
+    private async Task LoadThemePreferenceAsync()
+    { if (_userId == null) return; var dark = await _db.GetUserThemeDarkAsync(_userId.Value); _suppressThemeEvent = true; _themeSwitch.IsToggled = dark ?? false; ApplyTheme(_themeSwitch.IsToggled); _suppressThemeEvent = false; }
+
+    private async Task OnThemeToggledAsync(bool dark)
+    { if (_suppressThemeEvent) return; ApplyTheme(dark); if (_userId != null) await _db.SetUserThemeDarkAsync(_userId.Value, dark); }
+
+    private void ApplyTheme(bool dark)
+    {
+        _themeLabel.Text = dark ? "Dark" : "Light";
+        if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
+        RebuildVisibleItems(); // ensure theme-aware bindings update
+    }
+
     private void ScheduleHoverExpand(ItemVm vm)
     {
-        // FIX: use Id overload explicitly
         CancelHoverExpand(vm);
         var cts = new CancellationTokenSource();
         _hoverExpandCts[vm.Id] = cts;
@@ -820,7 +364,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private void RestoreFocusAfterListChange() { }
 #endif
 
-    // Overload helpers so existing calls using ItemVm still work
     private void CancelHoverExpand(ItemVm vm) => CancelHoverExpand(vm.Id);
     private void CancelHoverExpand(ItemVm vm, bool remove) => CancelHoverExpand(vm.Id);
 
@@ -930,157 +473,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
         foreach (var child in node.Children.OrderBy(c => c.SortKey)) AddWithDescendantsFiltered(child, target);
     }
 
-    private void ApplyResponsiveLayout(double width)
-    {
-        if (_twoPaneGrid == null) return;
-        const double threshold = 900;
-        _twoPaneGrid.ColumnDefinitions.Clear(); _twoPaneGrid.RowDefinitions.Clear();
-        if (width >= threshold)
-        { _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); Grid.SetColumn(_listsCard, 0); Grid.SetRow(_listsCard, 0); Grid.SetColumn(_itemsCard, 1); Grid.SetRow(_itemsCard, 0); }
-        else
-        { _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); Grid.SetColumn(_listsCard, 0); Grid.SetRow(_listsCard, 0); Grid.SetColumn(_itemsCard, 0); Grid.SetRow(_itemsCard, 1); }
-    }
-
-    private async Task InitializeAsync()
-    { if (_initialized) return; _initialized = true; _userId = await _db.GetUserIdAsync(_username); if (_userId == null) { await DisplayAlert("Error", "User not found.", "OK"); return; } await LoadThemePreferenceAsync(); await RefreshListsAsync(); }
-
-    private async Task LoadThemePreferenceAsync()
-    { if (_userId == null) return; var dark = await _db.GetUserThemeDarkAsync(_userId.Value); _suppressThemeEvent = true; _themeSwitch.IsToggled = dark ?? false; ApplyTheme(_themeSwitch.IsToggled); _suppressThemeEvent = false; }
-
-    private async Task OnThemeToggledAsync(bool dark)
-    { if (_suppressThemeEvent) return; ApplyTheme(dark); if (_userId != null) await _db.SetUserThemeDarkAsync(_userId.Value, dark); }
-
-    private void ApplyTheme(bool dark)
-    {
-        _themeLabel.Text = dark ? "Dark" : "Light";
-        if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
-        RebuildVisibleItems(); // ensure theme-aware bindings update
-    }
-
-    private async Task RefreshListsAsync()
-    {
-        if (_userId == null) return;
-        _lists = await _db.GetListsAsync(_userId.Value);
-        _listsObservable.Clear();
-        foreach (var l in _lists) _listsObservable.Add(l);
-        if (_lists.Count == 0)
-        {
-            _selectedListId = null; _items.Clear(); _allItems.Clear(); UpdateCompletedBadge();
-            if (_listsView != null) _listsView.SelectedItem = null;
-        }
-        else
-        {
-            if (_selectedListId == null || !_lists.Any(x => x.Id == _selectedListId))
-                _selectedListId = _lists.First().Id;
-            if (_listsView != null)
-            {
-                var sel = _lists.FirstOrDefault(x => x.Id == _selectedListId);
-                _listsView.SelectedItem = sel;
-            }
-            SyncDailyCheckboxWithSelectedList();
-            await RefreshItemsAsync();
-        }
-        UpdateAllListVisuals();
-    }
-
-    private void SyncDailyCheckboxWithSelectedList()
-    {
-        var id = SelectedListId; _suppressDailyEvent = true;
-        if (id == null) _dailyCheck.IsChecked = false; else { var lr = _lists.FirstOrDefault(x => x.Id == id); _dailyCheck.IsChecked = lr?.IsDaily ?? false; }
-        _suppressDailyEvent = false;
-    }
-
-    private async Task OnDailyToggledAsync(bool isChecked)
-    { if (_suppressDailyEvent) return; var id = SelectedListId; if (id == null) return; await _db.SetListDailyAsync(id.Value, isChecked); var lr = _lists.FirstOrDefault(x => x.Id == id.Value); if (lr != null) { var m = _lists.ToList(); var idx = m.FindIndex(x => x.Id == id.Value); if (idx >= 0) { m[idx] = new ListRecord(lr.Id, lr.Name, isChecked); _lists = m; } } }
-
-    private async Task CreateListAsync()
-    { if (_userId == null) return; var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked); _newListEntry.Text = string.Empty; _dailyCheck.IsChecked = false; await RefreshListsAsync(); }
-
-    private async Task DeleteCurrentListAsync()
-    { var id = SelectedListId; if (id == null) return; var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(id.Value)) { await RefreshListsAsync(); _items.Clear(); _allItems.Clear(); UpdateCompletedBadge(); } }
-
-    private async Task ResetCurrentListAsync()
-    { var id = SelectedListId; if (id == null) return; await _db.ResetListAsync(id.Value); await RefreshItemsAsync(); UpdateCompletedBadge(); }
-
-    private async Task RefreshItemsAsync()
-    {
-        if (_isRefreshing) return; _isRefreshing = true;
-        _items.Clear(); _allItems.Clear(); var listId = SelectedListId; if (listId == null) { UpdateCompletedBadge(); _isRefreshing = false; UpdateChildControls(); return; }
-        if (_userId != null)
-            _expandedStates = (await _db.GetExpandedStatesAsync(_userId.Value, listId.Value)).ToDictionary(k => k.Key, v => v.Value);
-        var items = await _db.GetItemsAsync(listId.Value);
-        int? selectedId = _selectedItem?.Id;
-        foreach (var i in items)
-        {
-            var isExpanded = _expandedStates.TryGetValue(i.Id, out var ex) ? ex : true;
-            var vm = new ItemVm(i.Id, i.ListId, i.Name, i.IsCompleted, i.ParentItemId, i.HasChildren, i.ChildrenCount, i.IncompleteChildrenCount, i.Level, isExpanded, i.Order, i.SortKey);
-            _allItems.Add(vm);
-        }
-        var byId = _allItems.ToDictionary(x => x.Id);
-        foreach (var vm in _allItems)
-        {
-            if (vm.ParentId != null)
-            {
-                if (byId.TryGetValue(vm.ParentId.Value, out var p))
-                {
-                    p.Children.Add(vm);
-                }
-            }
-        }
-        foreach (var vm in _allItems) vm.RecalcState();
-        _selectedItem = selectedId != null ? _allItems.FirstOrDefault(x => x.Id == selectedId.Value) : null;
-        await LoadHideCompletedPreferenceForSelectedListAsync();
-        RebuildVisibleItems(); UpdateCompletedBadge();
-        _lastRevision = await _db.GetListRevisionAsync(listId.Value);
-        _isRefreshing = false;
-        UpdateChildControls();
-#if WINDOWS
-        RestorePageFocus();
-#endif
-    }
-
-    private void RebuildVisibleItems()
-    {
-        _items.Clear(); var visible = new List<ItemVm>();
-        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.SortKey))
-        {
-            if (_hideCompleted) AddWithDescendantsFiltered(root, visible);
-            else AddWithDescendants(root, visible);
-        }
-        foreach (var v in visible) _items.Add(v);
-
-        // Update placeholder visibility
-        if (_emptyFilteredLabel != null)
-        {
-            _emptyFilteredLabel.IsVisible = _hideCompleted && visible.Count == 0 && _allItems.Any();
-            if (_emptyFilteredLabel.IsVisible)
-            {
-                var hiddenCount = _allItems.Count(i => i.IsCompleted);
-                _emptyFilteredLabel.Text = hiddenCount > 0
-                    ? $"All {hiddenCount} items are completed and hidden."
-                    : "All items are completed and hidden.";
-            }
-        }
-
-        if (_selectedItem != null)
-        {
-            // If selected item is hidden by filter, clear selection
-            if (!visible.Any(x => x.Id == _selectedItem.Id))
-            {
-                ClearSelectionAndUi();
-            }
-            else
-            {
-                var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
-                if (current != null)
-                    SetSingleSelection(current);
-                else
-                    ClearSelectionAndUi();
-            }
-        }
-        else ClearSelectionAndUi();
-    }
-
     private static int ComputeBetweenOrder(int? prev, int? next)
     {
         if (prev.HasValue && next.HasValue)
@@ -1090,75 +482,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
         if (next.HasValue)
             return next.Value - 1;
         return 0;
-    }
-
-    private async Task AddItemAsync()
-    { var listId = SelectedListId; if (listId == null) return; var name = _newItemEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.AddItemAsync(listId.Value, name); _newItemEntry.Text = string.Empty; await RefreshItemsAsync(); }
-
-    private async Task AddChildItemAsync()
-    {
-        if (_selectedItem == null) return; var listId = SelectedListId; if (listId == null) return; var name = _newChildEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return;
-        if (_selectedItem.Level >= 3) { await DisplayAlert("Depth Limit", "Cannot add a child beyond level 3.", "OK"); return; }
-        long expectedRevision = await _db.GetListRevisionAsync(listId.Value);
-        try { await _db.AddChildItemAsync(listId.Value, name, _selectedItem.Id, expectedRevision); }
-        catch (Exception ex) { await DisplayAlert("Add Child Failed", ex.Message, "OK"); return; }
-        _newChildEntry.Text = string.Empty; await RefreshItemsAsync(); var parent = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id); if (parent != null) { parent.IsExpanded = true; RebuildVisibleItems(); }
-        UpdateChildControls();
-    }
-
-    private void UpdateChildControls()
-    {
-        if (_newChildEntry == null || _addChildButton == null) return;
-        if (_selectedItem == null) { _newChildEntry.IsVisible = false; _addChildButton.IsVisible = false; _addChildButton.IsEnabled = false; return; }
-        bool canAdd = _selectedItem.Level < 3; _newChildEntry.IsVisible = canAdd; _addChildButton.IsVisible = canAdd; _addChildButton.IsEnabled = canAdd && !string.IsNullOrWhiteSpace(_newChildEntry.Text);
-    }
-
-    private void UpdateParentStates(ItemVm changed)
-    { var current = changed; while (current.ParentId != null) { var parent = _allItems.FirstOrDefault(x => x.Id == current.ParentId.Value); if (parent == null) break; parent.RecalcState(); current = parent; } for (int i = 0; i < _items.Count; i++) _items[i].RecalcState(); }
-
-    private void UpdateCompletedBadge()
-    { if (_allItems.Count == 0) { _completedBadge.IsVisible = false; return; } _completedBadge.IsVisible = _allItems.All(i => i.IsCompleted); }
-
-    private Button? _moveUpButton; private Button? _moveDownButton; private Button? _resetSubtreeButton;
-    private void UpdateMoveButtons()
-    {
-        if (_moveUpButton == null || _moveDownButton == null || _resetSubtreeButton == null) return;
-        bool hasSelection = _selectedItem != null;
-        _moveUpButton.IsEnabled = hasSelection;
-        _moveDownButton.IsEnabled = hasSelection;
-        _resetSubtreeButton.IsEnabled = hasSelection;
-        UpdateChildControls();
-    }
-
-    private async Task MoveSelectedAsync(int delta)
-    {
-        if (_selectedItem == null) return; var item = _selectedItem; var listId = SelectedListId; if (listId == null) return;
-        var siblings = _allItems.Where(x => x.ParentId == item.ParentId).OrderBy(x => x.Order).ThenBy(x => x.Id).ToList(); var idx = siblings.FindIndex(x => x.Id == item.Id); if (idx < 0) return;
-        var newIdx = idx + delta; if (newIdx < 0 || newIdx >= siblings.Count) return; var reordered = siblings.Where(x => x.Id != item.Id).ToList(); reordered.Insert(newIdx, item);
-        ItemVm? prev = newIdx - 1 >= 0 ? reordered[newIdx - 1] : null; ItemVm? next = newIdx + 1 < reordered.Count ? reordered[newIdx + 1] : null; int newOrder = ComputeBetweenOrder(prev?.Order, next?.Order);
-        long expectedRevision = await _db.GetListRevisionAsync(listId.Value); var ordered = await _db.SetItemOrderAsync(item.Id, newOrder, expectedRevision); if (!ordered.Ok) { await RefreshItemsAsync(); return; }
-        await RefreshItemsAsync(); _selectedItem = _allItems.FirstOrDefault(x => x.Id == item.Id); if (_selectedItem != null) SetSingleSelection(_selectedItem);
-    }
-
-    private async Task ResetSelectedSubtreeAsync()
-    {
-        if (_selectedItem == null) return; var listId = SelectedListId; if (listId == null) return;
-        var confirm = await DisplayAlert("Reset Subtree", $"Reset '{_selectedItem.Name}' and all its descendants to incomplete?", "Reset", "Cancel");
-        if (!confirm) return;
-        try
-        {
-            var expectedRevision = await _db.GetListRevisionAsync(listId.Value);
-            var (ok, newRev, affected) = await _db.ResetSubtreeAsync(_selectedItem.Id, expectedRevision);
-            if (!ok)
-            {
-                await DisplayAlert("Concurrency", "List changed; items refreshed.", "OK");
-                await RefreshItemsAsync();
-                return;
-            }
-            await RefreshItemsAsync();
-        }
-        catch (Exception ex)
-        { await DisplayAlert("Reset Failed", ex.Message, "OK"); }
     }
 
     protected override void OnHandlerChanged()
@@ -1184,7 +507,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
                     { _selectedItem.IsExpanded = false; RebuildVisibleItems(); if (_selectedItem != null) SetSingleSelection(_selectedItem); e.Handled = true; }
                     else
                     {
-                        // Navigate to parent if exists
                         if (_selectedItem.ParentId != null)
                         {
                             var parent = _allItems.FirstOrDefault(x => x.Id == _selectedItem.ParentId.Value);
@@ -1198,7 +520,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
                     { _selectedItem.IsExpanded = true; RebuildVisibleItems(); if (_selectedItem != null) SetSingleSelection(_selectedItem); e.Handled = true; }
                     else if (_selectedItem.HasChildren && _selectedItem.IsExpanded)
                     {
-                        // Move into first child
                         var firstChild = _selectedItem.Children.OrderBy(c => c.SortKey).FirstOrDefault();
                         if (firstChild != null)
                         { SetSingleSelection(firstChild); e.Handled = true; }
@@ -1210,11 +531,9 @@ public class DashboardPage : ContentPage, IQueryAttributable
     }
 #endif
 
-    // Attached properties for recycled item view tracking (ensure style refresh correctly)
     private static readonly BindableProperty TrackedVmProperty = BindableProperty.CreateAttached("TrackedVm", typeof(ItemVm), typeof(DashboardPage), null);
     private static readonly BindableProperty TrackedHandlerProperty = BindableProperty.CreateAttached("TrackedHandler", typeof(PropertyChangedEventHandler), typeof(DashboardPage), null);
 
-    // Single-selection helpers
     private void SetSingleSelection(ItemVm vm)
     {
         foreach (var it in _allItems)
@@ -1268,7 +587,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
     }
 #endif
 
-    // Converters for inline rename (added if missing)
     private class InvertBoolConverter : IValueConverter
     {
         public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => value is bool b ? !b : true;
@@ -1282,34 +600,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
         public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
     }
 
-    private async Task LoadHideCompletedPreferenceForSelectedListAsync()
-    {
-        var listId = SelectedListId; if (listId == null || _userId == null) return;
-        bool? server = null;
-        try { server = await _db.GetListHideCompletedAsync(_userId.Value, listId.Value); } catch { }
-        bool value = server ?? Preferences.Get($"LIST_HIDE_COMPLETED_{listId.Value}", false);
-        _suppressHideCompletedEvent = true;
-        _hideCompleted = value;
-        if (_hideCompletedSwitch != null) _hideCompletedSwitch.IsToggled = value;
-        _suppressHideCompletedEvent = false;
-    }
-
-    private async Task OnHideCompletedToggledAsync(bool hide)
-    {
-        if (_suppressHideCompletedEvent) return;
-        _hideCompleted = hide;
-        var listId = SelectedListId;
-        if (listId != null)
-        {
-            Preferences.Set($"LIST_HIDE_COMPLETED_{listId.Value}", hide);
-            if (_userId != null)
-            {
-                try { await _db.SetListHideCompletedAsync(_userId.Value, listId.Value, hide); } catch { }
-            }
-        }
-        RebuildVisibleItems();
-    }
-
     private async Task OpenShareAsync(ListRecord lr)
     {
         try
@@ -1319,7 +609,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 await DisplayAlert("Share", "User context missing.", "OK");
                 return;
             }
-            // Use new constructor with db and user
             var page = new ShareListPage(_db, lr, _userId.Value);
             await Navigation.PushModalAsync(page);
         }
@@ -1328,4 +617,4 @@ public class DashboardPage : ContentPage, IQueryAttributable
             await DisplayAlert("Share", $"Unable to open share dialog: {ex.Message}", "OK");
         }
     }
-} // end DashboardPage class
+}
