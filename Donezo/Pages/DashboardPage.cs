@@ -196,15 +196,38 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         };
     }
 
+    private bool _ownershipSubscribed; // prevent duplicate MessagingCenter subscriptions
+
     protected override void OnAppearing()
     {
         base.OnAppearing();
+        if (!_ownershipSubscribed)
+        {
+            MessagingCenter.Subscribe<ShareListPage, int>(this, "OwnershipTransferred", async (sender, listId) =>
+            {
+                try
+                {
+                    // Refresh lists; owned/shared classification handled inside RefreshListsAsync
+                    await RefreshListsAsync();
+                    _selectedListId = listId;
+                    UpdateAllListSelectionVisuals();
+                }
+                catch { }
+            });
+            _ownershipSubscribed = true;
+        }
         StartPolling();
     }
 
     protected override void OnDisappearing()
     {
         base.OnDisappearing();
+        // Unsubscribe to avoid leaks
+        if (_ownershipSubscribed)
+        {
+            try { MessagingCenter.Unsubscribe<ShareListPage, int>(this, "OwnershipTransferred"); } catch { }
+            _ownershipSubscribed = false;
+        }
         StopPolling();
     }
 
@@ -607,6 +630,13 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             if (_userId == null)
             {
                 await DisplayAlert("Share", "User context missing.", "OK");
+                return;
+            }
+            // Only allow owners to access share options
+            var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id);
+            if (ownerId == null || ownerId.Value != _userId.Value)
+            {
+                await DisplayAlert("Share", "Only the list owner can manage sharing.", "OK");
                 return;
             }
             var page = new ShareListPage(_db, lr, _userId.Value);
