@@ -155,10 +155,10 @@ public partial class DashboardPage
             nameLabel.SetBinding(Label.TextProperty, nameof(ItemVm.Name));
             nameLabel.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
             nameLabel.SetBinding(View.IsVisibleProperty, new Binding(nameof(ItemVm.IsRenaming), converter: new InvertBoolConverter()));
-            var userLabel = new Label { VerticalTextAlignment = TextAlignment.Center, FontSize = 12, TextColor = Colors.Green, FontAttributes = FontAttributes.Italic };
-            userLabel.SetBinding(Label.TextProperty, new Binding(nameof(ItemVm.LastActionUsername), stringFormat:"({0})"));
-            userLabel.SetBinding(Label.TextColorProperty, new Binding(nameof(ItemVm.IsCompleted), converter: new BoolToStringConverter { TrueText = "#008A2E", FalseText = "#C62828" }));
-            userLabel.SetBinding(Label.IsVisibleProperty, new Binding(nameof(ItemVm.LastActionUsername))); // visible when non-null/non-empty
+            var userLabel = new Label { VerticalTextAlignment = TextAlignment.Center, FontSize = 12, FontAttributes = FontAttributes.Italic };
+            userLabel.SetBinding(Label.TextProperty, new Binding(nameof(ItemVm.LastActionUsername)));
+            userLabel.SetBinding(Label.TextColorProperty, new Binding(nameof(ItemVm.IsCompleted), converter: new BoolToStringConverter { TrueText = "#008A2E", FalseText = "#008A2E" }));
+            userLabel.SetBinding(Label.IsVisibleProperty, new Binding(nameof(ItemVm.ShowCompletedUser)));
             var nameEntry = new Entry { HeightRequest = 32, FontSize = 14 };
             nameEntry.SetBinding(Entry.TextProperty, nameof(ItemVm.EditableName), BindingMode.TwoWay);
             nameEntry.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));

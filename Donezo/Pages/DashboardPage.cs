@@ -77,7 +77,11 @@ public class ItemVm : BindableObject
     private string _name;
     // Make setter public for inline rename updates
     public string Name { get => _name; set { if (_name == value) return; _name = value; OnPropertyChanged(nameof(Name)); } }
-    public bool IsCompleted { get; set; }
+    public bool ShowCompletedUser => IsCompleted && !string.IsNullOrWhiteSpace(LastActionUsername);
+    private string? _lastActionUsername;
+    public string? LastActionUsername { get => _lastActionUsername; set { if (_lastActionUsername == value) return; _lastActionUsername = value; OnPropertyChanged(nameof(LastActionUsername)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
+    private bool _isCompleted;
+    public bool IsCompleted { get => _isCompleted; set { if (_isCompleted == value) return; _isCompleted = value; OnPropertyChanged(nameof(IsCompleted)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
     public int? ParentId { get; }
     public bool HasChildren { get; }
     public int ChildrenCount { get; }
@@ -118,12 +122,9 @@ public class ItemVm : BindableObject
     public string PartialGlyph => CompletionState == CompletionVisualState.Partial ? "-" : string.Empty;
     public string ExpandGlyph => HasChildren ? (_isExpanded ? "v" : ">") : string.Empty;
 
-    private string? _lastActionUsername;
-    public string? LastActionUsername { get => _lastActionUsername; set { if (_lastActionUsername == value) return; _lastActionUsername = value; OnPropertyChanged(nameof(LastActionUsername)); } }
-
     public ItemVm(int id, int listId, string name, bool isCompleted, int? parentId, bool hasChildren, int childrenCount, int incompleteChildrenCount, int level, bool isExpanded, int order, string sortKey)
     {
-        Id = id; ListId = listId; _name = name; IsCompleted = isCompleted; ParentId = parentId; HasChildren = hasChildren; ChildrenCount = childrenCount; IncompleteChildrenCount = incompleteChildrenCount; Level = level; _isExpanded = isExpanded; Order = order; SortKey = sortKey; RecalcState();
+        Id = id; ListId = listId; _name = name; _isCompleted = isCompleted; ParentId = parentId; HasChildren = hasChildren; ChildrenCount = childrenCount; IncompleteChildrenCount = incompleteChildrenCount; Level = level; _isExpanded = isExpanded; Order = order; SortKey = sortKey; RecalcState();
     }
     public void RecalcState()
     {
