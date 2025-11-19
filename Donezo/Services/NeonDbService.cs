@@ -1249,6 +1249,24 @@ public partial class NeonDbService : INeonDbService
         await using var tx = await conn.BeginTransactionAsync(ct);
         try
         {
+            // Cleanup orphaned prior ownership-transfer codes (auto-generated contributor single-use codes no longer referenced by any membership)
+            var cleanupSql = @"update list_share_codes sc set is_deleted=true
+from (
+    select sc.id
+    from list_share_codes sc
+    left join list_memberships m on m.list_id=sc.list_id and m.via_code=sc.code and m.revoked=false
+    where sc.list_id=@l and sc.is_deleted=false and sc.max_redeems=1 and sc.redeemed_count=1
+      and ((sc.role='Contributor') or (sc.role is null and sc.role_id=@rid))
+      and m.id is null
+) x
+where sc.id = x.id";
+            await using (var cleanupCmd = new NpgsqlCommand(cleanupSql, conn, tx))
+            {
+                cleanupCmd.Parameters.AddWithValue("l", listId);
+                cleanupCmd.Parameters.AddWithValue("rid", contributorRoleId);
+                await cleanupCmd.ExecuteNonQueryAsync(ct);
+            }
+
             // Insert pre-redeemed contributor code for previous owner
             const string insertCodeSql = "insert into list_share_codes(list_id,code,role,role_id,expiration,max_redeems,redeemed_count,is_deleted) values(@l,@c,'Contributor',@rid,NULL,1,1,false) returning id";
             await using (var insCode = new NpgsqlCommand(insertCodeSql, conn, tx))
@@ -1304,7 +1322,7 @@ public partial class NeonDbService : INeonDbService
             {
                 delNewOwnerMembership.Parameters.AddWithValue("l", listId);
                 delNewOwnerMembership.Parameters.AddWithValue("u", newOwnerUserId);
-                await delNewOwnerMembership.ExecuteNonQueryAsync(ct); // ignore result; row may not exist if just deleted elsewhere
+                await delNewOwnerMembership.ExecuteNonQueryAsync(ct); // ignore result
             }
 
             await tx.CommitAsync(ct);
