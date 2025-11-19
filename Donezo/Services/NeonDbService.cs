@@ -132,7 +132,7 @@ public partial class NeonDbService : INeonDbService
         if (_schemaEnsured) return;
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        var sql = @"create table if not exists users ( id serial primary key, username text not null unique, email text, first_name text, last_name text, password_hash text not null, password_salt text not null, created_at timestamptz not null default now()); create table if not exists lists ( id serial primary key, user_id int not null references users(id) on delete cascade, name text not null, created_at timestamptz not null default now(), constraint uq_lists_user_name unique(user_id,name)); create table if not exists items ( id serial primary key, list_id int not null references lists(id) on delete cascade, name text not null, is_completed boolean not null default false, created_at timestamptz not null default now()); alter table if exists lists add column if not exists is_daily boolean not null default false; alter table if exists lists add column if not exists last_reset_date date; alter table if exists items add column if not exists parent_item_id int references items(id) on delete cascade; alter table if exists items add column if not exists ""order"" int not null default 0; create index if not exists ix_items_list_parent_order on items(list_id, parent_item_id, ""order""); alter table if exists lists add column if not exists revision bigint not null default 0; create table if not exists user_prefs ( user_id int primary key references users(id) on delete cascade, theme_dark boolean not null default false ); create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null; create table if not exists item_ui_state ( user_id int not null references users(id) on delete cascade, item_id int not null references items(id) on delete cascade, expanded boolean not null default true, primary key(user_id,item_id)); create table if not exists user_list_prefs ( user_id int not null references users(id) on delete cascade, list_id int not null references lists(id) on delete cascade, hide_completed boolean not null default false, updated_at timestamptz not null default now(), primary key(user_id,list_id) ); alter table if exists lists add column if not exists owner_user_id int references users(id) on delete cascade; create table if not exists roles ( id serial primary key, name text not null unique ); create table if not exists list_share_codes ( id serial primary key, list_id int not null references lists(id) on delete cascade, code text not null unique, role text not null, expiration timestamptz null, max_redeems int not null default 0, redeemed_count int not null default 0, is_deleted boolean not null default false, created_at timestamptz not null default now() ); create index if not exists ix_list_share_codes_list on list_share_codes(list_id); create table if not exists list_memberships ( id serial primary key, list_id int not null references lists(id) on delete cascade, user_id int not null references users(id) on delete cascade, role text not null, joined_at timestamptz not null default now(), revoked boolean not null default false, constraint uq_list_membership unique(list_id,user_id) ); create index if not exists ix_list_memberships_list on list_memberships(list_id);";
+        var sql = @"create table if not exists users ( id serial primary key, username text not null unique, email text, first_name text, last_name text, password_hash text not null, password_salt text not null, created_at timestamptz not null default now()); create table if not exists lists ( id serial primary key, user_id int not null references users(id) on delete cascade, name text not null, created_at timestamptz not null default now(), constraint uq_lists_user_name unique(user_id,name)); create table if not exists items ( id serial primary key, list_id int not null references lists(id) on delete cascade, name text not null, is_completed boolean not null default false, created_at timestamptz not null default now()); alter table if exists lists add column if not exists is_daily boolean not null default false; alter table if exists lists add column if not exists last_reset_date date; alter table if exists items add column if not exists ""order"" int not null default 0; alter table if exists items add column if not exists parent_item_id int references items(id) on delete cascade; create index if not exists ix_items_list_parent_order on items(list_id, parent_item_id, ""order""); alter table if exists lists add column if not exists revision bigint not null default 0; create table if not exists user_prefs ( user_id int primary key references users(id) on delete cascade, theme_dark boolean not null default false ); create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null; create table if not exists item_ui_state ( user_id int not null references users(id) on delete cascade, item_id int not null references items(id) on delete cascade, expanded boolean not null default true, primary key(user_id,item_id)); create table if not exists user_list_prefs ( user_id int not null references users(id) on delete cascade, list_id int not null references lists(id) on delete cascade, hide_completed boolean not null default false, updated_at timestamptz not null default now(), primary key(user_id,list_id) ); alter table if exists lists add column if not exists owner_user_id int references users(id) on delete cascade; create table if not exists roles ( id serial primary key, name text not null unique ); create table if not exists list_share_codes ( id serial primary key, list_id int not null references lists(id) on delete cascade, code text not null unique, role text not null, expiration timestamptz null, max_redeems int not null default 0, redeemed_count int not null default 0, is_deleted boolean not null default false, created_at timestamptz not null default now(), is_owner_code boolean not null default false ); create index if not exists ix_list_share_codes_list on list_share_codes(list_id); create table if not exists list_memberships ( id serial primary key, list_id int not null references lists(id) on delete cascade, user_id int not null references users(id) on delete cascade, role text not null, joined_at timestamptz not null default now(), revoked boolean not null default false, via_code text, constraint uq_list_membership unique(list_id,user_id) ); create index if not exists ix_list_memberships_list on list_memberships(list_id);";
         await using var cmd = new NpgsqlCommand(sql, conn);
         await cmd.ExecuteNonQueryAsync(ct);
         // Seed roles
@@ -148,16 +148,13 @@ public partial class NeonDbService : INeonDbService
         string addFkRoleId = @"do $$ begin if not exists (select 1 from pg_constraint where conname = 'fk_list_share_codes_role_id') then alter table list_share_codes add constraint fk_list_share_codes_role_id foreign key(role_id) references roles(id) on update cascade on delete restrict; end if; exception when others then end $$;";
         await using (var fkRoleId = new NpgsqlCommand(addFkRoleId, conn)) { await fkRoleId.ExecuteNonQueryAsync(ct); }
         await using (var setNotNull = new NpgsqlCommand("alter table list_share_codes alter column role_id set not null", conn))
-        { try { await setNotNull.ExecuteNonQueryAsync(ct); } catch { /* ignore if constraint prevents */ } }
+        { try { await setNotNull.ExecuteNonQueryAsync(ct); } catch { } }
         // Existing FKs on role name if not present
         string addFkSql = @"do $$ begin if not exists (select 1 from pg_constraint where conname = 'fk_list_share_codes_role') then alter table list_share_codes add constraint fk_list_share_codes_role foreign key(role) references roles(name) on update cascade on delete restrict; end if; if not exists (select 1 from pg_constraint where conname = 'fk_list_memberships_role') then alter table list_memberships add constraint fk_list_memberships_role foreign key(role) references roles(name) on update cascade on delete restrict; end if; end $$;";
         await using (var addFk = new NpgsqlCommand(addFkSql, conn)) { await addFk.ExecuteNonQueryAsync(ct); }
-        // Initialize owner_user_id where null
-        await using (var init = new NpgsqlCommand("update lists set owner_user_id=user_id where owner_user_id is null", conn))
-        { await init.ExecuteNonQueryAsync(ct); }
-        // New: add via_code to memberships for attribution
-        await using (var addViaCode = new NpgsqlCommand("alter table if exists list_memberships add column if not exists via_code text", conn))
-        { await addViaCode.ExecuteNonQueryAsync(ct); }
+        // Ensure is_owner_code flag exists even on pre-existing deployments
+        await using (var addOwnerFlag = new NpgsqlCommand("alter table if exists list_share_codes add column if not exists is_owner_code boolean not null default false", conn))
+        { await addOwnerFlag.ExecuteNonQueryAsync(ct); }
         _schemaEnsured = true;
     }
 
@@ -946,7 +943,6 @@ public partial class NeonDbService : INeonDbService
         return (true, newRevision, affected);
     }
 
-    // New: per-user per-list Hide Completed preference
     public async Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct);
@@ -981,7 +977,7 @@ public partial class NeonDbService : INeonDbService
         var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct);
         string sql = hasRoleCol
             ? "select sc.id, sc.list_id, sc.code, sc.role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted from list_share_codes sc where sc.list_id=@l order by sc.created_at desc"
-            : "select sc.id, sc.list_id, sc.code, r.name as role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted from list_share_codes sc left join roles r on r.id=sc.role_id where sc.list_id=@l order by sc.created_at desc";
+            : "select sc.id, sc.list_id, r.name as role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted from list_share_codes sc left join roles r on r.id=sc.role_id where sc.list_id=@l order by sc.created_at desc";
         await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("l", listId);
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
@@ -1084,7 +1080,6 @@ public partial class NeonDbService : INeonDbService
             }
 
             // Propagate role change to memberships created with the old role for this list
-            // Without a direct link between membership and code, we align all memberships with matching old role on the same list.
             const string updMembersSql = "update list_memberships set role=@newRole where list_id=@l and role=@oldRole";
             await using (var updMembers = new NpgsqlCommand(updMembersSql, conn, tx))
             {
@@ -1249,26 +1244,22 @@ public partial class NeonDbService : INeonDbService
         await using var tx = await conn.BeginTransactionAsync(ct);
         try
         {
-            // Cleanup orphaned prior ownership-transfer codes (auto-generated contributor single-use codes no longer referenced by any membership)
-            var cleanupSql = @"update list_share_codes sc set is_deleted=true
-from (
-    select sc.id
-    from list_share_codes sc
-    left join list_memberships m on m.list_id=sc.list_id and m.via_code=sc.code and m.revoked=false
-    where sc.list_id=@l and sc.is_deleted=false and sc.max_redeems=1 and sc.redeemed_count=1
-      and ((sc.role='Contributor') or (sc.role is null and sc.role_id=@rid))
-      and m.id is null
-) x
-where sc.id = x.id";
-            await using (var cleanupCmd = new NpgsqlCommand(cleanupSql, conn, tx))
+            // Cleanup any redeemed codes with no active membership reference (legacy or otherwise)
+            await using (var cleanupOrphans = new NpgsqlCommand("update list_share_codes sc set is_deleted=true where sc.list_id=@l and sc.is_deleted=false and sc.redeemed_count>=1 and not exists (select 1 from list_memberships m where m.list_id=@l and m.via_code=sc.code and m.revoked=false)", conn, tx))
             {
-                cleanupCmd.Parameters.AddWithValue("l", listId);
-                cleanupCmd.Parameters.AddWithValue("rid", contributorRoleId);
-                await cleanupCmd.ExecuteNonQueryAsync(ct);
+                cleanupOrphans.Parameters.AddWithValue("l", listId);
+                await cleanupOrphans.ExecuteNonQueryAsync(ct);
             }
 
-            // Insert pre-redeemed contributor code for previous owner
-            const string insertCodeSql = "insert into list_share_codes(list_id,code,role,role_id,expiration,max_redeems,redeemed_count,is_deleted) values(@l,@c,'Contributor',@rid,NULL,1,1,false) returning id";
+            // Cleanup all previous owner-generated codes for this list
+            await using (var cleanupOwner = new NpgsqlCommand("update list_share_codes set is_deleted=true where list_id=@l and is_owner_code=true", conn, tx))
+            {
+                cleanupOwner.Parameters.AddWithValue("l", listId);
+                await cleanupOwner.ExecuteNonQueryAsync(ct);
+            }
+
+            // Insert pre-redeemed contributor code for previous owner (mark as owner-generated)
+            const string insertCodeSql = "insert into list_share_codes(list_id,code,role,role_id,expiration,max_redeems,redeemed_count,is_deleted,is_owner_code) values(@l,@c,'Contributor',@rid,NULL,1,1,false,true) returning id";
             await using (var insCode = new NpgsqlCommand(insertCodeSql, conn, tx))
             {
                 insCode.Parameters.AddWithValue("l", listId);
@@ -1322,7 +1313,7 @@ where sc.id = x.id";
             {
                 delNewOwnerMembership.Parameters.AddWithValue("l", listId);
                 delNewOwnerMembership.Parameters.AddWithValue("u", newOwnerUserId);
-                await delNewOwnerMembership.ExecuteNonQueryAsync(ct); // ignore result
+                await delNewOwnerMembership.ExecuteNonQueryAsync(ct);
             }
 
             await tx.CommitAsync(ct);
@@ -1331,7 +1322,7 @@ where sc.id = x.id";
         catch (Exception ex)
         {
             try { await tx.RollbackAsync(ct); } catch { }
-            _logger?.LogError(ex, "TransferOwnershipAsync (cleanup new owner membership) failed for list {ListId}", listId);
+            _logger?.LogError(ex, "TransferOwnershipAsync failed for list {ListId}", listId);
             return false;
         }
     }

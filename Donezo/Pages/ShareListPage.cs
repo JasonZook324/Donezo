@@ -88,7 +88,7 @@ public class ShareListPage : ContentPage
         var records = await _db.GetMembershipsAsync(_list.Id);
         foreach (var m in records)
         {
-            _memberships.Add(new MembershipVm(m.Id, m.UserId, m.Username, m.Role, m.JoinedUtc, m.Revoked, _ownerUserId == m.UserId, _ownerUserId == _currentUserId));
+            _memberships.Add(new MembershipVm(m.Id, m.UserId, m.Username, m.Role, m.JoinedUtc, m.Revoked, _ownerUserId == m.UserId, _ownerUserId == _currentUserId, m.Code));
         }
         // ensure owner flag
         RefreshMemberships();
@@ -231,6 +231,8 @@ public class ShareListPage : ContentPage
                 roleLabel.SetBinding(Label.TextProperty, nameof(MembershipVm.RoleDisplay));
                 var joinedLabel = new Label { FontSize = 12, TextColor = Colors.Gray };
                 joinedLabel.SetBinding(Label.TextProperty, nameof(MembershipVm.JoinedDisplay));
+                var codeLabel = new Label { FontSize = 12, TextColor = Colors.Gray };
+                codeLabel.SetBinding(Label.TextProperty, nameof(MembershipVm.CodeDisplay));
                 var revokeBtn = new Button { Text = "Revoke", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, Padding = new Thickness(8, 4), TextColor = Colors.Red };
                 revokeBtn.SetBinding(IsVisibleProperty, nameof(MembershipVm.CanRevoke));
                 revokeBtn.Clicked += async (s, e) =>
@@ -267,7 +269,7 @@ public class ShareListPage : ContentPage
                     Content = new Label { Text = "Revoked", TextColor = Colors.Red, FontSize = 12, FontAttributes = FontAttributes.Bold }
                 };
                 revokedBadge.SetBinding(IsVisibleProperty, nameof(MembershipVm.IsRevoked));
-                outer.Content = new HorizontalStackLayout { Spacing = 12, Children = { userLabel, roleLabel, joinedLabel, revokeBtn, transferBtn, revokedBadge } };
+                outer.Content = new HorizontalStackLayout { Spacing = 12, Children = { userLabel, roleLabel, joinedLabel, codeLabel, revokeBtn, transferBtn, revokedBadge } };
                 return outer;
             })
         };
@@ -324,11 +326,13 @@ public class MembershipVm : BindableObject
     private bool _isRevoked;
     private bool _isOwner;
     private bool _currentUserIsOwner;
+    public string? ViaCode { get; }
     public bool IsRevoked { get => _isRevoked; set { if (_isRevoked == value) return; _isRevoked = value; OnPropertyChanged(nameof(IsRevoked)); OnPropertyChanged(nameof(RoleDisplay)); OnPropertyChanged(nameof(CanRevoke)); OnPropertyChanged(nameof(CanTransferOwnership)); } }
-    public MembershipVm(int membershipId, int userId, string username, string role, DateTime joinedUtc, bool revoked, bool isOwner, bool currentUserIsOwner)
-    { MembershipId = membershipId; UserId = userId; Username = username; Role = role; JoinedUtc = joinedUtc; _isRevoked = revoked; _isOwner = isOwner; _currentUserIsOwner = currentUserIsOwner; }
+    public MembershipVm(int membershipId, int userId, string username, string role, DateTime joinedUtc, bool revoked, bool isOwner, bool currentUserIsOwner, string? viaCode)
+    { MembershipId = membershipId; UserId = userId; Username = username; Role = role; JoinedUtc = joinedUtc; _isRevoked = revoked; _isOwner = isOwner; _currentUserIsOwner = currentUserIsOwner; ViaCode = viaCode; }
     public string JoinedDisplay => $"Joined: {JoinedUtc:yyyy-MM-dd}";
     public string RoleDisplay => _isOwner ? $"Owner ({Role})" : (_isRevoked ? "(Revoked)" : Role);
     public bool CanRevoke => !_isRevoked && !_isOwner && _currentUserIsOwner;
     public bool CanTransferOwnership => !_isRevoked && !_isOwner && _currentUserIsOwner;
+    public string CodeDisplay => string.IsNullOrWhiteSpace(ViaCode) ? string.Empty : $"Code: {ViaCode}";
 }
