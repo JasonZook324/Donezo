@@ -77,9 +77,9 @@ public class ItemVm : BindableObject
     private string _name;
     // Make setter public for inline rename updates
     public string Name { get => _name; set { if (_name == value) return; _name = value; OnPropertyChanged(nameof(Name)); } }
-    public bool ShowCompletedUser => IsCompleted && !string.IsNullOrWhiteSpace(LastActionUsername);
-    private string? _lastActionUsername;
-    public string? LastActionUsername { get => _lastActionUsername; set { if (_lastActionUsername == value) return; _lastActionUsername = value; OnPropertyChanged(nameof(LastActionUsername)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
+    public bool ShowCompletedUser => IsCompleted && !string.IsNullOrWhiteSpace(CompletedByUsername);
+    private string? _completedByUsername;
+    public string? CompletedByUsername { get => _completedByUsername; set { if (_completedByUsername == value) return; _completedByUsername = value; OnPropertyChanged(nameof(CompletedByUsername)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
     private bool _isCompleted;
     public bool IsCompleted { get => _isCompleted; set { if (_isCompleted == value) return; _isCompleted = value; OnPropertyChanged(nameof(IsCompleted)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
     public int? ParentId { get; }

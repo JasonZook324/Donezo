@@ -59,7 +59,7 @@ public interface INeonDbService
 
 public record ListRecord(int Id, string Name, bool IsDaily);
 public record SharedListRecord(int Id, string Name, bool IsDaily, string Role); // new record for shared lists with role
-public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int? ParentItemId, bool HasChildren, int ChildrenCount, int IncompleteChildrenCount, int Level, string SortKey, int Order, string? LastActionUsername);
+public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int? ParentItemId, bool HasChildren, int ChildrenCount, int IncompleteChildrenCount, int Level, string SortKey, int Order, int? CompletedByUserId, string? CompletedByUsername);
 public record ShareCodeRecord(int Id, int ListId, string Code, string Role, DateTime? ExpirationUtc, int MaxRedeems, int RedeemedCount, bool IsDeleted);
 public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked, string? Code);
 
@@ -159,6 +159,12 @@ public class NeonDbService : INeonDbService
         // Track last action user for completion toggles
         await using (var addActionUserCol = new NpgsqlCommand("alter table if exists items add column if not exists last_action_user_id int references users(id)", conn)) { await addActionUserCol.ExecuteNonQueryAsync(ct); }
         await using (var addActionUserNameCol = new NpgsqlCommand("alter table if exists items add column if not exists last_action_username text", conn)) { await addActionUserNameCol.ExecuteNonQueryAsync(ct); }
+        // New: explicit completion attribution
+        await using (var addCompletedByCol = new NpgsqlCommand("alter table if exists items add column if not exists completed_by_user_id int references users(id)", conn)) { await addCompletedByCol.ExecuteNonQueryAsync(ct); }
+        // Existing FKs on role name if not present
+        string addFkSql2 = @"do $$ begin if not exists (select 1 from pg_constraint where conname = 'fk_items_completed_by_user_id') then alter table items add constraint fk_items_completed_by_user_id foreign key(completed_by_user_id) references users(id) on update cascade on delete restrict; end if; end $$;";
+        await using (var addFk2 = new NpgsqlCommand(addFkSql2, conn)) { await addFk2.ExecuteNonQueryAsync(ct); }
+
         _schemaEnsured = true;
     }
 
@@ -348,28 +354,51 @@ public class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        var sql = @"with recursive tree as ( select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.""order"", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, 1 as level, lpad(i.""order""::text,10,'0') as sort_key, i.last_action_username from items i where i.list_id=@list and i.parent_item_id is null union all select c.id,c.list_id,c.name,c.is_completed,c.parent_item_id,c.""order"", (select count(*) from items cc where cc.parent_item_id=c.id) children_count, (select count(*) from items cc where cc.parent_item_id=c.id and cc.is_completed=false) incomplete_children_count, p.level+1 as level, p.sort_key || '-' || lpad(c.""order""::text,10,'0') as sort_key, c.last_action_username from items c join tree p on c.parent_item_id=p.id ) select * from tree order by sort_key;";
+        const string sql = """
+WITH RECURSIVE tree AS (
+ SELECT i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i."order",
+        (SELECT count(*) FROM items c WHERE c.parent_item_id=i.id) AS children_count,
+        (SELECT count(*) FROM items c WHERE c.parent_item_id=i.id AND c.is_completed=false) AS incomplete_children_count,
+        1 AS level,
+        lpad(i."order"::text,10,'0') AS sort_key,
+        i.completed_by_user_id,
+        u.username AS completed_by_username
+ FROM items i
+ LEFT JOIN users u ON u.id=i.completed_by_user_id
+ WHERE i.list_id=@list AND i.parent_item_id IS NULL
+ UNION ALL
+ SELECT c.id,c.list_id,c.name,c.is_completed,c.parent_item_id,c."order",
+        (SELECT count(*) FROM items cc WHERE cc.parent_item_id=c.id) AS children_count,
+        (SELECT count(*) FROM items cc WHERE cc.parent_item_id=c.id AND cc.is_completed=false) AS incomplete_children_count,
+        p.level+1 AS level,
+        p.sort_key || '-' || lpad(c."order"::text,10,'0') AS sort_key,
+        c.completed_by_user_id,
+        u2.username AS completed_by_username
+ FROM items c
+ LEFT JOIN users u2 ON u2.id=c.completed_by_user_id
+ JOIN tree p ON c.parent_item_id=p.id
+)
+SELECT * FROM tree ORDER BY sort_key;
+""";
         var items = new List<ItemRecord>();
-        await using (var cmd = new NpgsqlCommand(sql, conn))
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("list", listId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
         {
-            cmd.Parameters.AddWithValue("list", listId);
-            await using var r = await cmd.ExecuteReaderAsync(ct);
-            while (await r.ReadAsync(ct))
-            {
-                var id = r.GetInt32(0);
-                var listIdVal = r.GetInt32(1);
-                var name = r.GetString(2);
-                var completed = r.GetBoolean(3);
-                var parent = r.IsDBNull(4) ? (int?)null : r.GetInt32(4);
-                var order = r.GetInt32(5);
-                var childrenCount = r.GetInt32(6);
-                var incompleteChildrenCount = r.GetInt32(7);
-                var level = r.GetInt32(8);
-                var sortKey = r.GetString(9);
-                var hasChildren = childrenCount > 0;
-                var lastActionUser = r.IsDBNull(10)?null:r.GetString(10);
-                items.Add(new ItemRecord(id, listIdVal, name, completed, parent, hasChildren, childrenCount, incompleteChildrenCount, level, sortKey, order, lastActionUser));
-            }
+            var id = r.GetInt32(0);
+            var listIdVal = r.GetInt32(1);
+            var name = r.GetString(2);
+            var completed = r.GetBoolean(3);
+            var parent = r.IsDBNull(4) ? (int?)null : r.GetInt32(4);
+            var order = r.GetInt32(5);
+            var childrenCount = r.GetInt32(6);
+            var incompleteChildrenCount = r.GetInt32(7);
+            var level = r.GetInt32(8);
+            var sortKey = r.GetString(9);
+            var completedByUserId = r.IsDBNull(10) ? (int?)null : r.GetInt32(10);
+            var completedByUsername = r.IsDBNull(11) ? null : r.GetString(11);
+            items.Add(new ItemRecord(id, listIdVal, name, completed, parent, childrenCount > 0, childrenCount, incompleteChildrenCount, level, sortKey, order, completedByUserId, completedByUsername));
         }
         return items;
     }
@@ -484,7 +513,13 @@ public class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        var sql = @"select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.""order"", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, i.last_action_username from items i where i.id=@i";
+        var sql = """
+select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i."order",
+       (select count(*) from items c where c.parent_item_id=i.id) children_count,
+       (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count,
+       i.completed_by_user_id, cu.username as completed_by_username
+from items i left join users cu on cu.id=i.completed_by_user_id where i.id=@i;
+""";
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("i", itemId);
         await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -497,9 +532,10 @@ public class NeonDbService : INeonDbService
         var order = r.GetInt32(5);
         var childrenCount = r.GetInt32(6);
         var incompleteChildrenCount = r.GetInt32(7);
-        var lastActionUser = r.IsDBNull(8)?null:r.GetString(8);
+        var completedByUserId = r.IsDBNull(8) ? (int?)null : r.GetInt32(8);
+        var completedByUsername = r.IsDBNull(9) ? null : r.GetString(9);
         var hasChildren = childrenCount > 0;
-        return new ItemRecord(id, listIdVal, name, completed, parent, hasChildren, childrenCount, incompleteChildrenCount, 0, string.Empty, order, lastActionUser);
+        return new ItemRecord(id, listIdVal, name, completed, parent, hasChildren, childrenCount, incompleteChildrenCount, 0, string.Empty, order, completedByUserId, completedByUsername);
     }
 
     public async Task<IReadOnlyList<ItemRecord>> GetChildrenAsync(int parentItemId, CancellationToken ct = default)
@@ -507,7 +543,13 @@ public class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        var sql = @"select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.""order"", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, i.last_action_username from items i where i.parent_item_id=@p order by i.""order""";
+        var sql = """
+select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i."order",
+       (select count(*) from items c where c.parent_item_id=i.id) children_count,
+       (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count,
+       i.completed_by_user_id, cu.username as completed_by_username
+from items i left join users cu on cu.id=i.completed_by_user_id where i.parent_item_id=@p order by i."order";
+""";
         var list = new List<ItemRecord>();
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("p", parentItemId);
@@ -522,9 +564,10 @@ public class NeonDbService : INeonDbService
             var order = r.GetInt32(5);
             var childrenCount = r.GetInt32(6);
             var incompleteChildrenCount = r.GetInt32(7);
-            var lastActionUser = r.IsDBNull(8)?null:r.GetString(8);
+            var completedByUserId = r.IsDBNull(8) ? (int?)null : r.GetInt32(8);
+            var completedByUsername = r.IsDBNull(9) ? null : r.GetString(9);
             var hasChildren = childrenCount > 0;
-            list.Add(new ItemRecord(id, listIdVal, name, completed, parent, hasChildren, childrenCount, incompleteChildrenCount, 0, string.Empty, order, lastActionUser));
+            list.Add(new ItemRecord(id, listIdVal, name, completed, parent, hasChildren, childrenCount, incompleteChildrenCount, 0, string.Empty, order, completedByUserId, completedByUsername));
         }
         return list;
     }
@@ -613,7 +656,7 @@ public class NeonDbService : INeonDbService
     { if (string.IsNullOrWhiteSpace(newName)) return (false,0); await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); int listId; await using (var info = new NpgsqlCommand("select list_id from items where id=@i", conn)) { info.Parameters.AddWithValue("i", itemId); var res = await info.ExecuteScalarAsync(ct); if (res is int li) listId = li; else return (false,0); } var currentRevision = await GetListRevisionInternalAsync(conn, listId, ct); if (currentRevision != expectedRevision) return (false,currentRevision); long newRevision; await using (var tx = await conn.BeginTransactionAsync(ct)) { await using (var upd = new NpgsqlCommand("update items set name=@n where id=@i", conn, tx)) { upd.Parameters.AddWithValue("n", newName); upd.Parameters.AddWithValue("i", itemId); await upd.ExecuteNonQueryAsync(ct); } newRevision = await IncrementRevisionAsync(conn, listId, tx, ct); await tx.CommitAsync(ct); } return (true,newRevision); }
 
     public async Task<(bool Ok,long NewRevision,int Affected)> ResetSubtreeAsync(int rootItemId, long expectedRevision, CancellationToken ct = default)
-    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); int listId; int? parentId; await using (var info = new NpgsqlCommand("select list_id,parent_item_id from items where id=@i", conn)) { info.Parameters.AddWithValue("i", rootItemId); await using var r = await info.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return (false,0,0); listId = r.GetInt32(0); parentId = r.IsDBNull(1)?null:r.GetInt32(1); } var currentRevision = await GetListRevisionInternalAsync(conn, listId, ct); if (currentRevision != expectedRevision) return (false,currentRevision,0); long newRevision; int affected=0; await using (var tx = await conn.BeginTransactionAsync(ct)) { var sql = @"with recursive sub as ( select id,parent_item_id from items where id=@root union all select i.id,i.parent_item_id from items i join sub s on i.parent_item_id=s.id ) update items set is_completed=false where id in (select id from sub);"; await using (var cmd = new NpgsqlCommand(sql, conn, tx)) { cmd.Parameters.AddWithValue("root", rootItemId); affected = await cmd.ExecuteNonQueryAsync(ct); } int? cur = parentId; while (cur!=null) { await using (var updAnc = new NpgsqlCommand("update items set is_completed=false where id=@p", conn, tx)) { updAnc.Parameters.AddWithValue("p", cur.Value); await updAnc.ExecuteNonQueryAsync(ct); } await using (var getp = new NpgsqlCommand("select parent_item_id from items where id=@p", conn, tx)) { getp.Parameters.AddWithValue("p", cur.Value); var res = await getp.ExecuteScalarAsync(ct); cur = res is int pi ? (int?)pi : null; } } newRevision = await IncrementRevisionAsync(conn, listId, tx, ct); await tx.CommitAsync(ct); } return (true,newRevision,affected); }
+    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); int listId; int? parentId; await using (var info = new NpgsqlCommand("select list_id,parent_item_id from items where id=@i", conn)) { info.Parameters.AddWithValue("i", rootItemId); await using var r = await info.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return (false,0,0); listId = r.GetInt32(0); parentId = r.IsDBNull(1)?null:r.GetInt32(1); } var currentRevision = await GetListRevisionInternalAsync(conn, listId, ct); if (currentRevision != expectedRevision) return (false,currentRevision,0); long newRevision; int affected=0; await using (var tx = await conn.BeginTransactionAsync(ct)) { var sql = @"with recursive sub as ( select id,parent_item_id from items where id=@root union all select i.id,i.parent_item_id from items i join sub s on i.parent_item_id=s.id ) update items set is_completed=false, completed_by_user_id=null where id in (select id from sub);"; await using (var cmd = new NpgsqlCommand(sql, conn, tx)) { cmd.Parameters.AddWithValue("root", rootItemId); affected = await cmd.ExecuteNonQueryAsync(ct); } int? cur = parentId; while (cur!=null) { await using (var updAnc = new NpgsqlCommand("update items set is_completed=false,completed_by_user_id=null where id=@p", conn, tx)) { updAnc.Parameters.AddWithValue("p", cur.Value); await updAnc.ExecuteNonQueryAsync(ct); } await using (var getp = new NpgsqlCommand("select parent_item_id from items where id=@p", conn, tx)) { getp.Parameters.AddWithValue("p", cur.Value); var res = await getp.ExecuteScalarAsync(ct); cur = res is int pi ? (int?)pi : null; } } newRevision = await IncrementRevisionAsync(conn, listId, tx, ct); await tx.CommitAsync(ct); } return (true,newRevision,affected); }
 
     public async Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("select hide_completed from user_list_prefs where user_id=@u and list_id=@l", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); var res = await cmd.ExecuteScalarAsync(ct); if (res is null || res is DBNull) return null; return (bool)res; }
@@ -631,7 +674,8 @@ public class NeonDbService : INeonDbService
     { if (string.IsNullOrWhiteSpace(role)) return null; await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); int? roleId = null; await using (var getRole = new NpgsqlCommand("select id from roles where name=@r", conn)) { getRole.Parameters.AddWithValue("r", role); var rObj = await getRole.ExecuteScalarAsync(ct); roleId = rObj is int rid ? rid : (int?)null; } if (roleId==null) return null; var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct); string code = GenerateShareCode(); int guard=0; bool exists; do { await using var chk = new NpgsqlCommand("select 1 from list_share_codes where code=@c", conn); chk.Parameters.AddWithValue("c", code); exists = (await chk.ExecuteScalarAsync(ct))!=null; if (exists) code = GenerateShareCode(); } while (exists && guard++<10); string insertSql = hasRoleCol ? "insert into list_share_codes(list_id,code,role,role_id,expiration,max_redeems) values(@l,@c,@r,@rid,@e,@m) returning id" : "insert into list_share_codes(list_id,code,role_id,expiration,max_redeems) values(@l,@c,@rid,@e,@m) returning id"; await using var cmd = new NpgsqlCommand(insertSql, conn); cmd.Parameters.AddWithValue("l", listId); cmd.Parameters.AddWithValue("c", code); if (hasRoleCol) cmd.Parameters.AddWithValue("r", role); cmd.Parameters.AddWithValue("rid", roleId.Value); cmd.Parameters.AddWithValue("e", (object?)expirationUtc ?? DBNull.Value); cmd.Parameters.AddWithValue("m", maxRedeems); var idObj = await cmd.ExecuteScalarAsync(ct); if (idObj is int id) return new ShareCodeRecord(id,listId,code,role,expirationUtc,maxRedeems,0,false); return null; }
 
     public async Task<bool> UpdateShareCodeRoleAsync(int shareCodeId, string newRole, CancellationToken ct = default)
-    { if (string.IsNullOrWhiteSpace(newRole)) return false; await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); int? roleId=null; await using (var getRole = new NpgsqlCommand("select id from roles where name=@r", conn)) { getRole.Parameters.AddWithValue("r", newRole); var rObj = await getRole.ExecuteScalarAsync(ct); roleId = rObj is int rid ? rid : (int?)null; } if (roleId==null) return false; var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct); int listId; string oldRole; string readSql = hasRoleCol ? "select list_id, role from list_share_codes where id=@i" : "select sc.list_id, r.name as role from list_share_codes sc left join roles r on r.id=sc.role_id where sc.id=@i"; await using (var readCmd = new NpgsqlCommand(readSql, conn)) { readCmd.Parameters.AddWithValue("i", shareCodeId); await using var r = await readCmd.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return false; listId = r.GetInt32(0); oldRole = r.GetString(1); } if (string.Equals(oldRole,newRole,StringComparison.OrdinalIgnoreCase)) return true; await using var tx = await conn.BeginTransactionAsync(ct);
+    { if (string.IsNullOrWhiteSpace(newRole)) return false; await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); int? roleId=null; await using (var getRole = new NpgsqlCommand("select id from roles where name=@r", conn)) { getRole.Parameters.AddWithValue("r", newRole); var rObj = await getRole.ExecuteScalarAsync(ct); roleId = rObj is int rid ? rid : (int?)null; } if (roleId==null) return false; var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct); int listId; string oldRole; string readSql = hasRoleCol ? "select list_id, role from list_share_codes where id=@i" : "select sc.list_id, r.name as role from list_share_codes sc left join roles r on r.id=sc.role_id where sc.id=@i"; await using (var readCmd = new NpgsqlCommand(readSql, conn)) { readCmd.Parameters.AddWithValue("i", shareCodeId); await using var r = await readCmd.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return false; listId = r.GetInt32(0); oldRole = r.GetString(1); } if (string.Equals(oldRole,newRole,StringComparison.OrdinalIgnoreCase)) return true;
+        await using var tx = await conn.BeginTransactionAsync(ct);
         try { 
             string sql = hasRoleCol ? "update list_share_codes set role=@r, role_id=@rid where id=@i" : "update list_share_codes set role_id=@rid where id=@i"; 
             await using (var cmd = new NpgsqlCommand(sql, conn, tx)) { if (hasRoleCol) cmd.Parameters.AddWithValue("r", newRole); cmd.Parameters.AddWithValue("rid", roleId.Value); cmd.Parameters.AddWithValue("i", shareCodeId); if (await cmd.ExecuteNonQueryAsync(ct)!=1) { await tx.RollbackAsync(ct); return false; } }
@@ -919,7 +963,6 @@ public class NeonDbService : INeonDbService
 
     private async Task<bool> SetItemCompletedByUserInternalAsync(int itemId, int userId, bool completed, CancellationToken ct)
     {
-        // existing implementation moved from private helper
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
         int listId; int? parentId; bool currentCompleted;
@@ -932,23 +975,23 @@ public class NeonDbService : INeonDbService
         {
             await using (var chkChildren = new NpgsqlCommand("select count(*) from items where parent_item_id=@i and is_completed=false", conn, tx))
             { chkChildren.Parameters.AddWithValue("i", itemId); var cntObj = await chkChildren.ExecuteScalarAsync(ct); var cnt = cntObj is long l ? (int)l : cntObj is int i ? i : 0; if (cnt > 0) { await tx.RollbackAsync(ct); return false; } }
-            await using (var upd = new NpgsqlCommand("update items set is_completed=true,last_action_user_id=@u,last_action_username=@un where id=@i", conn, tx))
-            { upd.Parameters.AddWithValue("u", userId == 0 ? (object?)DBNull.Value : userId); upd.Parameters.AddWithValue("un", (object?)username ?? DBNull.Value); upd.Parameters.AddWithValue("i", itemId); await upd.ExecuteNonQueryAsync(ct); }
+            await using (var upd = new NpgsqlCommand("update items set is_completed=true,completed_by_user_id=@cuser,last_action_user_id=@u,last_action_username=@un where id=@i", conn, tx))
+            { upd.Parameters.AddWithValue("cuser", userId == 0 ? (object?)DBNull.Value : userId); upd.Parameters.AddWithValue("u", userId == 0 ? (object?)DBNull.Value : userId); upd.Parameters.AddWithValue("un", (object?)username ?? DBNull.Value); upd.Parameters.AddWithValue("i", itemId); await upd.ExecuteNonQueryAsync(ct); }
             if (parentId != null)
             {
                 await using (var allDone = new NpgsqlCommand("select count(*) from items where parent_item_id=@p and is_completed=false", conn, tx))
-                { allDone.Parameters.AddWithValue("p", parentId.Value); var remainObj = await allDone.ExecuteScalarAsync(ct); var remain = remainObj is long l2 ? (int)l2 : remainObj is int i2 ? i2 : 0; if (remain == 0) { await using var updParent = new NpgsqlCommand("update items set is_completed=true,last_action_user_id=@u,last_action_username=@un where id=@p", conn, tx); updParent.Parameters.AddWithValue("u", userId == 0 ? (object?)DBNull.Value : userId); updParent.Parameters.AddWithValue("un", (object?)username ?? DBNull.Value); updParent.Parameters.AddWithValue("p", parentId.Value); await updParent.ExecuteNonQueryAsync(ct); } }
+                { allDone.Parameters.AddWithValue("p", parentId.Value); var remainObj = await allDone.ExecuteScalarAsync(ct); var remain = remainObj is long l2 ? (int)l2 : remainObj is int i2 ? i2 : 0; if (remain == 0) { await using var updParent = new NpgsqlCommand("update items set is_completed=true,completed_by_user_id=@cuser,last_action_user_id=@u,last_action_username=@un where id=@p", conn, tx); updParent.Parameters.AddWithValue("cuser", userId == 0 ? (object?)DBNull.Value : userId); updParent.Parameters.AddWithValue("u", userId == 0 ? (object?)DBNull.Value : userId); updParent.Parameters.AddWithValue("un", (object?)username ?? DBNull.Value); updParent.Parameters.AddWithValue("p", parentId.Value); await updParent.ExecuteNonQueryAsync(ct); } }
             }
         }
         else
         {
-            await using (var upd = new NpgsqlCommand("update items set is_completed=false,last_action_user_id=@u,last_action_username=@un where id=@i", conn, tx))
+            await using (var upd = new NpgsqlCommand("update items set is_completed=false,completed_by_user_id=null,last_action_user_id=@u,last_action_username=@un where id=@i", conn, tx))
             { upd.Parameters.AddWithValue("u", userId == 0 ? (object?)DBNull.Value : userId); upd.Parameters.AddWithValue("un", (object?)username ?? DBNull.Value); upd.Parameters.AddWithValue("i", itemId); await upd.ExecuteNonQueryAsync(ct); }
             var currentParent = parentId;
             while (currentParent != null)
             {
-                await using (var updAnc = new NpgsqlCommand("update items set is_completed=false,last_action_user_id=@u,last_action_username=@un where id=@p", conn, tx))
-                { updAnc.Parameters.AddWithValue("u", userId == 0 ? (object?)DBNull.Value : userId); updAnc.Parameters.AddWithValue("un", (object?)username ?? DBNull.Value); updAnc.Parameters.AddWithValue("p", currentParent.Value); await updAnc.ExecuteNonQueryAsync(ct); }
+                await using (var updAnc = new NpgsqlCommand("update items set is_completed=false,completed_by_user_id=null where id=@p", conn, tx))
+                { updAnc.Parameters.AddWithValue("p", currentParent.Value); await updAnc.ExecuteNonQueryAsync(ct); }
                 int? nextParent = null; await using (var getp = new NpgsqlCommand("select parent_item_id from items where id=@p", conn, tx)) { getp.Parameters.AddWithValue("p", currentParent.Value); var res = await getp.ExecuteScalarAsync(ct); nextParent = res is int ip ? (int?)ip : null; }
                 currentParent = nextParent;
             }

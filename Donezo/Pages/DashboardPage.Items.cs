@@ -156,9 +156,9 @@ public partial class DashboardPage
             nameLabel.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
             nameLabel.SetBinding(View.IsVisibleProperty, new Binding(nameof(ItemVm.IsRenaming), converter: new InvertBoolConverter()));
             var userLabel = new Label { VerticalTextAlignment = TextAlignment.Center, FontSize = 12, FontAttributes = FontAttributes.Italic };
-            userLabel.SetBinding(Label.TextProperty, new Binding(nameof(ItemVm.LastActionUsername)));
+            userLabel.SetBinding(Label.TextProperty, new Binding("CompletedByUsername"));
             userLabel.SetBinding(Label.TextColorProperty, new Binding(nameof(ItemVm.IsCompleted), converter: new BoolToStringConverter { TrueText = "#008A2E", FalseText = "#008A2E" }));
-            userLabel.SetBinding(Label.IsVisibleProperty, new Binding(nameof(ItemVm.ShowCompletedUser)));
+            userLabel.SetBinding(Label.IsVisibleProperty, new Binding("ShowCompletedUser"));
             var nameEntry = new Entry { HeightRequest = 32, FontSize = 14 };
             nameEntry.SetBinding(Entry.TextProperty, nameof(ItemVm.EditableName), BindingMode.TwoWay);
             nameEntry.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
@@ -167,15 +167,13 @@ public partial class DashboardPage
             var dragOnName = new DragGestureRecognizer { CanDrag = true }; dragOnName.DragStarting += OnDragStarting; nameContainer.GestureRecognizers.Add(dragOnName);
             grid.Add(nameContainer, 2, 0);
             var statusStack = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, ColumnSpacing = 4 };
-            var check = new CheckBox { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+            var check = new CheckBox { HorizontalOptions = LayoutOptions.Center };
             check.SetBinding(CheckBox.IsCheckedProperty, nameof(ItemVm.IsCompleted));
             check.CheckedChanged += async (s, e) =>
             {
                 if (((BindableObject)s).BindingContext is ItemVm ir)
                 {
-                    var ok = await _db.SetItemCompletedAsync(ir.Id, e.Value);
-                    if (!ok) { await DisplayAlert("Blocked", "Parent cannot be completed until all direct children are complete.", "OK"); await RefreshItemsAsync(); return; }
-                    ir.IsCompleted = e.Value; UpdateParentStates(ir); UpdateCompletedBadge(); if (_hideCompleted) RebuildVisibleItems();
+                    await ToggleItemCompletionInlineAsync(ir, e.Value);
                 }
             };
             var partialIndicator = new Label { TextColor = Colors.Orange, FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center, HorizontalTextAlignment = TextAlignment.Center, FontSize = 14, WidthRequest = 12 };
@@ -285,7 +283,7 @@ public partial class DashboardPage
         {
             var isExpanded = _expandedStates.TryGetValue(i.Id, out var ex) ? ex : true;
             var vm = new ItemVm(i.Id, i.ListId, i.Name, i.IsCompleted, i.ParentItemId, i.HasChildren, i.ChildrenCount, i.IncompleteChildrenCount, i.Level, isExpanded, i.Order, i.SortKey);
-            vm.LastActionUsername = i.LastActionUsername;
+            vm.CompletedByUsername = i.CompletedByUsername;
             _allItems.Add(vm);
         }
         var byId = _allItems.ToDictionary(x => x.Id);
@@ -389,5 +387,61 @@ public partial class DashboardPage
     {
         if (_suppressHideCompletedEvent) return; _hideCompleted = hide; var listId = SelectedListId; if (listId != null) { Preferences.Set($"LIST_HIDE_COMPLETED_{listId.Value}", hide); if (_userId != null) { try { await _db.SetListHideCompletedAsync(_userId.Value, listId.Value, hide); } catch { } } }
         RebuildVisibleItems();
+    }
+
+    private async Task ToggleItemCompletionInlineAsync(ItemVm vm, bool completed)
+    {
+        bool ok;
+        if (_userId != null)
+            ok = await _db.SetItemCompletedByUserAsync(vm.Id, _userId.Value, completed);
+        else
+            ok = await _db.SetItemCompletedAsync(vm.Id, completed);
+        if (!ok)
+        {
+            await DisplayAlert("Blocked", "Parent cannot be completed until all direct children are complete.", "OK");
+            await RefreshItemsAsync();
+            return;
+        }
+        // Update current item from DB for authoritative attribution
+        try
+        {
+            var record = await _db.GetItemAsync(vm.Id);
+            if (record != null)
+            {
+                vm.IsCompleted = record.IsCompleted;
+                vm.CompletedByUsername = record.CompletedByUsername;
+                vm.RecalcState();
+            }
+            // Update ancestor chain to reflect possible auto-completions or resets
+            int guard = 0; var curParentId = vm.ParentId;
+            while (curParentId != null && guard++ < 64)
+            {
+                var parentVm = _allItems.FirstOrDefault(x => x.Id == curParentId.Value);
+                if (parentVm == null) break;
+                var parentRec = await _db.GetItemAsync(parentVm.Id);
+                if (parentRec != null)
+                {
+                    parentVm.IsCompleted = parentRec.IsCompleted;
+                    parentVm.CompletedByUsername = parentRec.CompletedByUsername;
+                    parentVm.RecalcState();
+                }
+                curParentId = parentVm.ParentId;
+            }
+            // Recalc states for visible list
+            foreach (var it in _items) it.RecalcState();
+            if (_hideCompleted) RebuildVisibleItems();
+            UpdateCompletedBadge();
+        }
+        catch
+        {
+            // Fallback to full refresh on any error
+            await RefreshItemsAsync();
+        }
+        // Update last revision for polling coherence
+        try
+        {
+            var listId = SelectedListId; if (listId != null) _lastRevision = await _db.GetListRevisionAsync(listId.Value);
+        }
+        catch { }
     }
 }
