@@ -43,10 +43,21 @@ public interface INeonDbService
     // New: per-user per-list Hide Completed preference
     Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default);
     Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default);
+    Task<IReadOnlyList<ShareCodeRecord>> GetShareCodesAsync(int listId, CancellationToken ct = default);
+    Task<ShareCodeRecord?> CreateShareCodeAsync(int listId, string role, DateTime? expirationUtc, int maxRedeems, CancellationToken ct = default);
+    Task<bool> UpdateShareCodeRoleAsync(int shareCodeId, string newRole, CancellationToken ct = default);
+    Task<bool> SoftDeleteShareCodeAsync(int shareCodeId, CancellationToken ct = default);
+    Task<(bool Ok, MembershipRecord? Membership)> RedeemShareCodeAsync(int listId, int userId, string code, CancellationToken ct = default);
+    Task<IReadOnlyList<MembershipRecord>> GetMembershipsAsync(int listId, CancellationToken ct = default);
+    Task<bool> RevokeMembershipAsync(int listId, int userId, CancellationToken ct = default);
+    Task<bool> TransferOwnershipAsync(int listId, int newOwnerUserId, CancellationToken ct = default);
+    Task<int?> GetListOwnerUserIdAsync(int listId, CancellationToken ct = default);
 }
 
 public record ListRecord(int Id, string Name, bool IsDaily);
 public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int? ParentItemId, bool HasChildren, int ChildrenCount, int IncompleteChildrenCount, int Level, string SortKey, int Order);
+public record ShareCodeRecord(int Id, int ListId, string Code, string Role, DateTime? ExpirationUtc, int MaxRedeems, int RedeemedCount, bool IsDeleted);
+public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked);
 
 public class NeonDbService : INeonDbService
 {
@@ -118,9 +129,12 @@ public class NeonDbService : INeonDbService
         if (_schemaEnsured) return;
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        var sql = @"create table if not exists users ( id serial primary key, username text not null unique, email text, first_name text, last_name text, password_hash text not null, password_salt text not null, created_at timestamptz not null default now()); create table if not exists lists ( id serial primary key, user_id int not null references users(id) on delete cascade, name text not null, created_at timestamptz not null default now(), constraint uq_lists_user_name unique(user_id,name)); create table if not exists items ( id serial primary key, list_id int not null references lists(id) on delete cascade, name text not null, is_completed boolean not null default false, created_at timestamptz not null default now()); alter table if exists lists add column if not exists is_daily boolean not null default false; alter table if exists lists add column if not exists last_reset_date date; alter table if exists items add column if not exists parent_item_id int references items(id) on delete cascade; alter table if exists items add column if not exists ""order"" int not null default 0; create index if not exists ix_items_list_parent_order on items(list_id, parent_item_id, ""order""); alter table if exists lists add column if not exists revision bigint not null default 0; create table if not exists user_prefs ( user_id int primary key references users(id) on delete cascade, theme_dark boolean not null default false ); create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null; create table if not exists item_ui_state ( user_id int not null references users(id) on delete cascade, item_id int not null references items(id) on delete cascade, expanded boolean not null default true, primary key(user_id,item_id)); create table if not exists user_list_prefs ( user_id int not null references users(id) on delete cascade, list_id int not null references lists(id) on delete cascade, hide_completed boolean not null default false, updated_at timestamptz not null default now(), primary key(user_id,list_id) );";
+        var sql = @"create table if not exists users ( id serial primary key, username text not null unique, email text, first_name text, last_name text, password_hash text not null, password_salt text not null, created_at timestamptz not null default now()); create table if not exists lists ( id serial primary key, user_id int not null references users(id) on delete cascade, name text not null, created_at timestamptz not null default now(), constraint uq_lists_user_name unique(user_id,name)); create table if not exists items ( id serial primary key, list_id int not null references lists(id) on delete cascade, name text not null, is_completed boolean not null default false, created_at timestamptz not null default now()); alter table if exists lists add column if not exists is_daily boolean not null default false; alter table if exists lists add column if not exists last_reset_date date; alter table if exists items add column if not exists parent_item_id int references items(id) on delete cascade; alter table if exists items add column if not exists ""order"" int not null default 0; create index if not exists ix_items_list_parent_order on items(list_id, parent_item_id, ""order""); alter table if exists lists add column if not exists revision bigint not null default 0; create table if not exists user_prefs ( user_id int primary key references users(id) on delete cascade, theme_dark boolean not null default false ); create unique index if not exists ux_users_email_lower on users ((lower(email))) where email is not null; create table if not exists item_ui_state ( user_id int not null references users(id) on delete cascade, item_id int not null references items(id) on delete cascade, expanded boolean not null default true, primary key(user_id,item_id)); create table if not exists user_list_prefs ( user_id int not null references users(id) on delete cascade, list_id int not null references lists(id) on delete cascade, hide_completed boolean not null default false, updated_at timestamptz not null default now(), primary key(user_id,list_id) ); alter table if exists lists add column if not exists owner_user_id int references users(id) on delete cascade; create table if not exists list_share_codes ( id serial primary key, list_id int not null references lists(id) on delete cascade, code text not null unique, role text not null, expiration timestamptz null, max_redeems int not null default 0, redeemed_count int not null default 0, is_deleted boolean not null default false, created_at timestamptz not null default now() ); create index if not exists ix_list_share_codes_list on list_share_codes(list_id); create table if not exists list_memberships ( id serial primary key, list_id int not null references lists(id) on delete cascade, user_id int not null references users(id) on delete cascade, role text not null, joined_at timestamptz not null default now(), revoked boolean not null default false, constraint uq_list_membership unique(list_id,user_id) ); create index if not exists ix_list_memberships_list on list_memberships(list_id);";
         await using var cmd = new NpgsqlCommand(sql, conn);
         await cmd.ExecuteNonQueryAsync(ct);
+        // Initialize owner_user_id where null
+        await using (var init = new NpgsqlCommand("update lists set owner_user_id=user_id where owner_user_id is null", conn))
+        { await init.ExecuteNonQueryAsync(ct); }
         _schemaEnsured = true;
     }
 
@@ -143,20 +157,6 @@ public class NeonDbService : INeonDbService
         await conn.OpenAsync(ct);
         await using (var check = new NpgsqlCommand("select 1 from users where lower(username)=lower(@u) or lower(email)=lower(@e)", conn))
         {
-            check.Parameters.AddWithValue("u", username);
-            check.Parameters.AddWithValue("e", email);
-            if (await check.ExecuteScalarAsync(ct) != null) return false;
-        }
-        var salt = GenerateSalt(16);
-        var hash = HashPassword(password, salt, 100_000);
-        await using (var ins = new NpgsqlCommand("insert into users(username,email,first_name,last_name,password_hash,password_salt) values(@u,@e,@f,@l,@h,@s)", conn))
-        {
-            ins.Parameters.AddWithValue("u", username);
-            ins.Parameters.AddWithValue("e", email);
-            ins.Parameters.AddWithValue("f", firstName);
-            ins.Parameters.AddWithValue("l", lastName);
-            ins.Parameters.AddWithValue("h", hash);
-            ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt));
             await ins.ExecuteNonQueryAsync(ct);
         }
         return true;
