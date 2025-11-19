@@ -1314,7 +1314,13 @@ public class DashboardPage : ContentPage, IQueryAttributable
     {
         try
         {
-            var page = new ShareListPage(lr); // ensure using Donezo.Services.ListRecord
+            if (_userId == null)
+            {
+                await DisplayAlert("Share", "User context missing.", "OK");
+                return;
+            }
+            // Use new constructor with db and user
+            var page = new ShareListPage(_db, lr, _userId.Value);
             await Navigation.PushModalAsync(page);
         }
         catch (Exception ex)
