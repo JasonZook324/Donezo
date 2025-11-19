@@ -155,11 +155,15 @@ public partial class DashboardPage
             nameLabel.SetBinding(Label.TextProperty, nameof(ItemVm.Name));
             nameLabel.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
             nameLabel.SetBinding(View.IsVisibleProperty, new Binding(nameof(ItemVm.IsRenaming), converter: new InvertBoolConverter()));
+            var userLabel = new Label { VerticalTextAlignment = TextAlignment.Center, FontSize = 12, Margin = new Thickness(6,0,0,0) };
+            userLabel.SetBinding(Label.TextProperty, new Binding("LastActionUsername", stringFormat:"({0})"));
+            userLabel.SetBinding(Label.TextColorProperty, new Binding(nameof(ItemVm.IsCompleted), converter: new BoolToStringConverter { TrueText = "#008A2E", FalseText = "#C62828" }));
+            userLabel.SetBinding(Label.IsVisibleProperty, new Binding("LastActionUsername", converter: new BoolToAccessibleExpandNameConverter()));
             var nameEntry = new Entry { HeightRequest = 32, FontSize = 14 };
             nameEntry.SetBinding(Entry.TextProperty, nameof(ItemVm.EditableName), BindingMode.TwoWay);
             nameEntry.SetBinding(View.MarginProperty, new Binding(nameof(ItemVm.Level), converter: new LevelIndentConverter()));
             nameEntry.SetBinding(View.IsVisibleProperty, nameof(ItemVm.IsRenaming));
-            nameContainer.Add(nameLabel); nameContainer.Add(nameEntry);
+            nameContainer.Add(nameLabel); nameContainer.Add(nameEntry); nameContainer.Add(userLabel);
             var dragOnName = new DragGestureRecognizer { CanDrag = true }; dragOnName.DragStarting += OnDragStarting; nameContainer.GestureRecognizers.Add(dragOnName);
             grid.Add(nameContainer, 2, 0);
             var statusStack = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, ColumnSpacing = 4 };
@@ -280,7 +284,7 @@ public partial class DashboardPage
         foreach (var i in items)
         {
             var isExpanded = _expandedStates.TryGetValue(i.Id, out var ex) ? ex : true;
-            var vm = new ItemVm(i.Id, i.ListId, i.Name, i.IsCompleted, i.ParentItemId, i.HasChildren, i.ChildrenCount, i.IncompleteChildrenCount, i.Level, isExpanded, i.Order, i.SortKey);
+            var vm = new ItemVm(i.Id, i.ListId, i.Name, i.IsCompleted, i.ParentItemId, i.HasChildren, i.ChildrenCount, i.IncompleteChildrenCount, i.Level, isExpanded, i.Order, i.SortKey) { LastActionUsername = i.LastActionUsername }; // assumes ItemVm has settable LastActionUsername
             _allItems.Add(vm);
         }
         var byId = _allItems.ToDictionary(x => x.Id);
