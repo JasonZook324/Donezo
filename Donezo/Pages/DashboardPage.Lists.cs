@@ -191,16 +191,36 @@ public partial class DashboardPage
     private async Task RefreshListsAsync()
     {
         if (_userId == null) return;
-        _ownedLists = await _db.GetOwnedListsAsync(_userId.Value);
+        // Legacy owned lists (creator) fetched first
+        var legacyOwned = await _db.GetOwnedListsAsync(_userId.Value);
+        var actuallyOwned = new List<ListRecord>();
+        foreach (var lr in legacyOwned)
+        {
+            try
+            {
+                var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id);
+                if (ownerId != null && ownerId.Value == _userId.Value)
+                {
+                    actuallyOwned.Add(lr);
+                }
+            }
+            catch { }
+        }
+        _ownedLists = actuallyOwned;
         _sharedLists = await _db.GetSharedListsAsync(_userId.Value);
+
         _listsObservable.Clear();
         _sharedListsObservable.Clear();
         foreach (var o in _ownedLists) _listsObservable.Add(o);
         foreach (var s in _sharedLists) _sharedListsObservable.Add(s);
+
         _sharedHeading.IsVisible = _sharedListsObservable.Count > 0;
         _sharedListsView.IsVisible = _sharedListsObservable.Count > 0;
+
         var allIds = _ownedLists.Select(x => x.Id).Concat(_sharedLists.Select(x => x.Id)).ToHashSet();
-        if (_selectedListId == null || !allIds.Contains(_selectedListId.Value)) _selectedListId = _ownedLists.FirstOrDefault()?.Id ?? _sharedLists.FirstOrDefault()?.Id;
+        if (_selectedListId == null || !allIds.Contains(_selectedListId.Value))
+            _selectedListId = _ownedLists.FirstOrDefault()?.Id ?? _sharedLists.FirstOrDefault()?.Id;
+
         await RefreshItemsAsync();
         UpdateAllListSelectionVisuals();
     }
@@ -229,4 +249,7 @@ public partial class DashboardPage
 
     private View BuildHideCompletedPreferenceRow()
     { _hideCompletedSwitch = new Switch(); _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value); return new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } }; }
+
+    // Removed erroneous file-scope MessagingCenter subscription that caused build errors.
+    // Ownership transfer handling is defined in DashboardPage.OnAppearing in DashboardPage.cs.
 }

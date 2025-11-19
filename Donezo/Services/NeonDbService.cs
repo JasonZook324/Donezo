@@ -1208,67 +1208,115 @@ public partial class NeonDbService : INeonDbService
     public async Task<bool> TransferOwnershipAsync(int listId, int newOwnerUserId, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct);
- await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
 
-    // Fetch current owner
-    int? prevOwnerUserId = null;
-    await using (var getOwner = new NpgsqlCommand("select owner_user_id from lists where id=@l", conn))
-    { 
-        getOwner.Parameters.AddWithValue("l", listId); 
-        var oRes = await getOwner.ExecuteScalarAsync(ct); 
-        if (oRes is int po) prevOwnerUserId = po; else return false; 
-    }
-
-    // Short-circuit if same owner
-    if (prevOwnerUserId == newOwnerUserId) return true;
-
-    // Validate new owner is active member
-    await using (var chk = new NpgsqlCommand("select 1 from list_memberships where list_id=@l and user_id=@u and revoked=false", conn))
-    { 
-        chk.Parameters.AddWithValue("l", listId); 
-        chk.Parameters.AddWithValue("u", newOwnerUserId); 
-        if (await chk.ExecuteScalarAsync(ct) == null) return false; 
-    }
-
-    await using var tx = await conn.BeginTransactionAsync(ct);
-    try
-    {
-        // Ensure previous owner keeps non-revoked membership with fallback role if losing ownership
-        if (prevOwnerUserId != null)
+        int? prevOwnerUserId = null;
+        await using (var getOwner = new NpgsqlCommand("select owner_user_id from lists where id=@l", conn))
         {
-            const string fallbackRole = "Contributor";
-            var upsertSql = @"insert into list_memberships(list_id,user_id,role,revoked) values(@l,@prev,@role,false)
-                              on conflict (list_id,user_id) do update set revoked=false,
-                              role = case when list_memberships.revoked then excluded.role else list_memberships.role end";
-            await using (var upsert = new NpgsqlCommand(upsertSql, conn, tx))
-            { 
-                upsert.Parameters.AddWithValue("l", listId); 
-                upsert.Parameters.AddWithValue("prev", prevOwnerUserId.Value); 
-                upsert.Parameters.AddWithValue("role", fallbackRole); 
-                await upsert.ExecuteNonQueryAsync(ct); 
+            getOwner.Parameters.AddWithValue("l", listId);
+            var oRes = await getOwner.ExecuteScalarAsync(ct);
+            if (oRes is int po) prevOwnerUserId = po; else return false;
+        }
+        if (prevOwnerUserId == null) return false;
+        if (prevOwnerUserId == newOwnerUserId) return true; // no change
+
+        // Verify new owner currently has an active membership (required to transfer)
+        await using (var chkNew = new NpgsqlCommand("select 1 from list_memberships where list_id=@l and user_id=@u and revoked=false", conn))
+        {
+            chkNew.Parameters.AddWithValue("l", listId);
+            chkNew.Parameters.AddWithValue("u", newOwnerUserId);
+            if (await chkNew.ExecuteScalarAsync(ct) == null) return false;
+        }
+
+        // Resolve contributor role id for previous owner membership creation/update
+        int contributorRoleId;
+        await using (var roleCmd = new NpgsqlCommand("select id from roles where name='Contributor'", conn))
+        {
+            var rObj = await roleCmd.ExecuteScalarAsync(ct);
+            if (rObj is int rid) contributorRoleId = rid; else return false;
+        }
+
+        string genCode = GenerateShareCode();
+        int guard = 0; bool exists;
+        do
+        {
+            await using var chk = new NpgsqlCommand("select 1 from list_share_codes where code=@c", conn);
+            chk.Parameters.AddWithValue("c", genCode);
+            exists = (await chk.ExecuteScalarAsync(ct)) != null;
+            if (exists) genCode = GenerateShareCode();
+        } while (exists && guard++ < 10);
+
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        try
+        {
+            // Insert pre-redeemed contributor code for previous owner
+            const string insertCodeSql = "insert into list_share_codes(list_id,code,role,role_id,expiration,max_redeems,redeemed_count,is_deleted) values(@l,@c,'Contributor',@rid,NULL,1,1,false) returning id";
+            await using (var insCode = new NpgsqlCommand(insertCodeSql, conn, tx))
+            {
+                insCode.Parameters.AddWithValue("l", listId);
+                insCode.Parameters.AddWithValue("c", genCode);
+                insCode.Parameters.AddWithValue("rid", contributorRoleId);
+                var idObj = await insCode.ExecuteScalarAsync(ct);
+                if (idObj is not int) { await tx.RollbackAsync(ct); return false; }
             }
 
-            // Note: removed auto-created redeemed share code (max_redeems=1) for previous owner.
-            // The previous owner remains a member via the upsert above.
-        }
+            // Upsert previous owner membership to Contributor with via_code
+            await using (var getMembership = new NpgsqlCommand("select id,role,revoked,via_code from list_memberships where list_id=@l and user_id=@u", conn, tx))
+            {
+                getMembership.Parameters.AddWithValue("l", listId);
+                getMembership.Parameters.AddWithValue("u", prevOwnerUserId.Value);
+                await using var r = await getMembership.ExecuteReaderAsync(ct);
+                if (await r.ReadAsync(ct))
+                {
+                    var id = r.GetInt32(0);
+                    var revoked = r.GetBoolean(2);
+                    await r.DisposeAsync();
+                    string updSql = revoked
+                        ? "update list_memberships set revoked=false, role='Contributor', via_code=@code where id=@id"
+                        : "update list_memberships set role='Contributor', via_code=@code where id=@id";
+                    await using var upd = new NpgsqlCommand(updSql, conn, tx);
+                    upd.Parameters.AddWithValue("code", genCode);
+                    upd.Parameters.AddWithValue("id", id);
+                    await upd.ExecuteNonQueryAsync(ct);
+                }
+                else
+                {
+                    await r.DisposeAsync();
+                    await using var insMembership = new NpgsqlCommand("insert into list_memberships(list_id,user_id,role,revoked,via_code) values(@l,@u,'Contributor',false,@code)", conn, tx);
+                    insMembership.Parameters.AddWithValue("l", listId);
+                    insMembership.Parameters.AddWithValue("u", prevOwnerUserId.Value);
+                    insMembership.Parameters.AddWithValue("code", genCode);
+                    await insMembership.ExecuteNonQueryAsync(ct);
+                }
+            }
 
-        int rows;
-        await using (var setOwner = new NpgsqlCommand("update lists set owner_user_id=@u where id=@l", conn, tx))
-        { 
-            setOwner.Parameters.AddWithValue("u", newOwnerUserId); 
-            setOwner.Parameters.AddWithValue("l", listId); 
-            rows = await setOwner.ExecuteNonQueryAsync(ct); 
-        }
+            // Transfer ownership (also bump revision so clients detect change)
+            await using (var setOwner = new NpgsqlCommand("update lists set owner_user_id=@new, revision=revision+1 where id=@l", conn, tx))
+            {
+                setOwner.Parameters.AddWithValue("new", newOwnerUserId);
+                setOwner.Parameters.AddWithValue("l", listId);
+                if (await setOwner.ExecuteNonQueryAsync(ct) != 1)
+                { await tx.RollbackAsync(ct); return false; }
+            }
 
-        await tx.CommitAsync(ct);
-        return rows == 1;
+            // Remove new owner's now-redundant membership row
+            await using (var delNewOwnerMembership = new NpgsqlCommand("delete from list_memberships where list_id=@l and user_id=@u", conn, tx))
+            {
+                delNewOwnerMembership.Parameters.AddWithValue("l", listId);
+                delNewOwnerMembership.Parameters.AddWithValue("u", newOwnerUserId);
+                await delNewOwnerMembership.ExecuteNonQueryAsync(ct); // ignore result; row may not exist if just deleted elsewhere
+            }
+
+            await tx.CommitAsync(ct);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            try { await tx.RollbackAsync(ct); } catch { }
+            _logger?.LogError(ex, "TransferOwnershipAsync (cleanup new owner membership) failed for list {ListId}", listId);
+            return false;
+        }
     }
-    catch
-    {
-        try { await tx.RollbackAsync(ct); } catch { }
-        return false;
-    }
-}
 
     public async Task<int?> GetListOwnerUserIdAsync(int listId, CancellationToken ct = default)
     {

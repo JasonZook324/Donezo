@@ -196,20 +196,26 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         };
     }
 
+    private bool _ownershipSubscribed; // prevent duplicate MessagingCenter subscriptions
+
     protected override void OnAppearing()
     {
         base.OnAppearing();
-        // Subscribe to ownership transfer notifications from ShareListPage to refresh grouping
-        MessagingCenter.Subscribe<ShareListPage, int>(this, "OwnershipTransferred", async (sender, listId) =>
+        if (!_ownershipSubscribed)
         {
-            try
+            MessagingCenter.Subscribe<ShareListPage, int>(this, "OwnershipTransferred", async (sender, listId) =>
             {
-                await RefreshListsAsync();
-                _selectedListId = listId;
-                UpdateAllListSelectionVisuals();
-            }
-            catch { }
-        });
+                try
+                {
+                    // Refresh lists; owned/shared classification handled inside RefreshListsAsync
+                    await RefreshListsAsync();
+                    _selectedListId = listId;
+                    UpdateAllListSelectionVisuals();
+                }
+                catch { }
+            });
+            _ownershipSubscribed = true;
+        }
         StartPolling();
     }
 
@@ -217,7 +223,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     {
         base.OnDisappearing();
         // Unsubscribe to avoid leaks
-        MessagingCenter.Unsubscribe<ShareListPage, int>(this, "OwnershipTransferred");
+        if (_ownershipSubscribed)
+        {
+            try { MessagingCenter.Unsubscribe<ShareListPage, int>(this, "OwnershipTransferred"); } catch { }
+            _ownershipSubscribed = false;
+        }
         StopPolling();
     }
 

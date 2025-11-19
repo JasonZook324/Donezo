@@ -253,10 +253,12 @@ public class ShareListPage : ContentPage
                         if (!confirm) return;
                         var ok = await _db.TransferOwnershipAsync(_list.Id, vm.UserId);
                         if (!ok) { await DisplayAlert("Transfer", "Failed to transfer ownership.", "OK"); return; }
+                        // First close modal so dashboard is visible
+                        try { await Navigation.PopModalAsync(); } catch { }
+                        // Brief delay to allow UI thread to finish closing
+                        await Task.Delay(50);
                         // Notify Dashboard to refresh grouping; previous owner now becomes shared member
                         try { MessagingCenter.Send(this, "OwnershipTransferred", _list.Id); } catch { }
-                        // Close modal only (no reopen) – dashboard will show list under shared section.
-                        try { await Navigation.PopModalAsync(); } catch { }
                     }
                 };
                 var revokedBadge = new Border
