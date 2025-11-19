@@ -22,6 +22,50 @@ public partial class DashboardPage
     private Button _addChildButton = null!;
     private Button? _moveUpButton; private Button? _moveDownButton; private Button? _resetSubtreeButton;
 
+    // Track materialized item card borders so theme change can reapply styles consistently.
+    private readonly List<Border> _itemCardBorders = new();
+
+    // Centralized style logic (kept in one place to avoid mismatch).
+    private void ApplyItemCardStyle(Border card, ItemVm vm)
+    {
+        var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
+        var defaultBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
+        var defaultStroke = (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
+        if (vm.IsDragging)
+        {
+            card.BackgroundColor = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.18f);
+            card.Opacity = 0.75;
+            card.Stroke = (Color)Application.Current!.Resources["Primary"]; return;
+        }
+        if (vm.IsPreDrag)
+        {
+            card.BackgroundColor = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.12f);
+            card.Opacity = 0.9;
+            card.Stroke = defaultStroke; return;
+        }
+        if (vm.IsSelected)
+        {
+            card.BackgroundColor = defaultBg;
+            card.Opacity = 1.0;
+            card.Stroke = (Color)Application.Current!.Resources["Primary"]; return;
+        }
+        card.BackgroundColor = defaultBg;
+        card.Opacity = 1.0;
+        card.Stroke = defaultStroke;
+    }
+
+    // Public helper for theme toggle.
+    private void RefreshItemCardStyles()
+    {
+        foreach (var card in _itemCardBorders.ToList())
+        {
+            if (card.BindingContext is ItemVm vm)
+            {
+                ApplyItemCardStyle(card, vm);
+            }
+        }
+    }
+
     private Border BuildItemsCard()
     {
         _emptyFilteredLabel ??= new Label { IsVisible = false, TextColor = Colors.Gray, FontSize = 12 };
@@ -71,16 +115,6 @@ public partial class DashboardPage
         {
             var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) }, Padding = new Thickness(0) };
             card.SetBinding(Border.OpacityProperty, new Binding(nameof(ItemVm.IsDragging), converter: new BoolToOpacityConverter()));
-            Action<ItemVm> applyStyle = vm =>
-            {
-                var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
-                var defaultBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
-                var defaultStroke = (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
-                if (vm.IsDragging) { card.BackgroundColor = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.18f); card.Opacity = 0.75; card.Stroke = (Color)Application.Current!.Resources["Primary"]; return; }
-                if (vm.IsPreDrag) { card.BackgroundColor = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.12f); card.Opacity = 0.9; card.Stroke = defaultStroke; return; }
-                if (vm.IsSelected) { card.BackgroundColor = defaultBg; card.Opacity = 1.0; card.Stroke = (Color)Application.Current!.Resources["Primary"]; return; }
-                card.BackgroundColor = defaultBg; card.Opacity = 1.0; card.Stroke = defaultStroke;
-            };
             Color zoneHover = ((Color)Application.Current!.Resources["Primary"]).WithAlpha(0.15f);
             double GetInsertionGapHeight()
             {
@@ -123,7 +157,7 @@ public partial class DashboardPage
                 if (((BindableObject)card).BindingContext is ItemVm vm)
                 {
                     _holdCts?.Cancel();
-                    vm.IsPreDrag = false; vm.IsDragging = true; applyStyle(vm);
+                    vm.IsPreDrag = false; vm.IsDragging = true; ApplyItemCardStyle(card, vm);
                     _dragItem = vm; _pendingDragVm = vm; _dragDropCompleted = false;
                     try { e.Data.Properties["ItemId"] = vm.Id; } catch { }
                 }
@@ -230,13 +264,14 @@ public partial class DashboardPage
             {
                 if (s is Border b)
                 {
+                    if (!_itemCardBorders.Contains(b)) _itemCardBorders.Add(b);
                     if (b.GetValue(TrackedVmProperty) is ItemVm oldVm && b.GetValue(TrackedHandlerProperty) is PropertyChangedEventHandler oldHandler) { try { oldVm.PropertyChanged -= oldHandler; } catch { } }
                     if (b.BindingContext is ItemVm vm)
                     {
-                        applyStyle(vm);
+                        ApplyItemCardStyle(b, vm);
                         PropertyChangedEventHandler handler = (sender, args) =>
                         {
-                            if (args.PropertyName == nameof(ItemVm.IsDragging) || args.PropertyName == nameof(ItemVm.IsPreDrag) || args.PropertyName == nameof(ItemVm.IsSelected)) { applyStyle(vm); }
+                            if (args.PropertyName == nameof(ItemVm.IsDragging) || args.PropertyName == nameof(ItemVm.IsPreDrag) || args.PropertyName == nameof(ItemVm.IsSelected)) { ApplyItemCardStyle(b, vm); }
                         };
                         vm.PropertyChanged += handler; b.SetValue(TrackedVmProperty, vm); b.SetValue(TrackedHandlerProperty, handler);
                     }
@@ -297,6 +332,7 @@ public partial class DashboardPage
 #if WINDOWS
         RestorePageFocus();
 #endif
+        RefreshItemCardStyles(); // ensure styles reflect current theme
     }
 
     private void RebuildVisibleItems()
@@ -319,6 +355,7 @@ public partial class DashboardPage
             else { var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id); if (current != null) SetSingleSelection(current); else ClearSelectionAndUi(); }
         }
         else ClearSelectionAndUi();
+        RefreshItemCardStyles(); // immediate style sync
     }
 
     private async Task AddItemAsync()
