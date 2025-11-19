@@ -142,7 +142,10 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private INeonDbService _db;
     private string _username = string.Empty;
     private int? _userId;
-    private Picker _listsPicker = null!;
+    // REPLACED: private Picker _listsPicker = null!;
+    private CollectionView _listsView = null!; // new list selection view
+    private readonly ObservableCollection<ListRecord> _listsObservable = new();
+    private int? _selectedListId; // replaces picker SelectedItem
     private Entry _newListEntry = null!;
     private CheckBox _dailyCheck = null!;
     private Button _createListButton = null!;
@@ -181,7 +184,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private bool _suppressDailyEvent;
     private bool _suppressThemeEvent;
     private bool _initialized;
-    private int? SelectedListId => _listsPicker.SelectedItem is ListRecord lr ? lr.Id : null;
+    private int? SelectedListId => _selectedListId;
 
     // Responsive layout fields
     private Grid _twoPaneGrid = null!;
@@ -197,6 +200,30 @@ public class DashboardPage : ContentPage, IQueryAttributable
     private readonly Dictionary<int, CancellationTokenSource> _hoverExpandCts = new();
 
     private DataTemplate? _itemViewTemplate; // for custom item template
+
+    // List visual helper methods (inserted)
+    private readonly List<Border> _listItemBorders = new(); // track list item borders for visual refresh
+    private void ApplyListVisual(Border b)
+    {
+        if (b.BindingContext is ListRecord lr)
+        {
+            var primary = (Color)Application.Current!.Resources["Primary"];
+            var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
+            var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
+            bool selected = _selectedListId == lr.Id;
+            b.BackgroundColor = selected ? primary.WithAlpha(0.12f) : baseBg;
+            b.Stroke = selected ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
+        }
+    }
+    private void UpdateAllListSelectionVisuals()
+    {
+        foreach (var b in _listItemBorders)
+        {
+            ApplyListVisual(b);
+        }
+    }
+    // Replace previous UpdateAllListVisuals logic
+    private void UpdateAllListVisuals() => UpdateAllListSelectionVisuals();
 
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
@@ -291,15 +318,11 @@ public class DashboardPage : ContentPage, IQueryAttributable
 
     private void BuildUi()
     {
-        _listsPicker = new Picker { Title = "Select List" };
-        _listsPicker.ItemDisplayBinding = new Binding("Name");
-        _listsPicker.SelectedIndexChanged += async (_, _) => { await RefreshItemsAsync(); SyncDailyCheckboxWithSelectedList(); RestoreFocusAfterListChange(); };
-
+        // LISTS PANEL --------------------------------------------------
         _newListEntry = new Entry { Placeholder = "New list name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
         _dailyCheck.CheckedChanged += async (s, e) => await OnDailyToggledAsync(e.Value);
         var dailyRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Daily" }, _dailyCheck } };
-
         _createListButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         _createListButton.Clicked += async (_, _) => await CreateListAsync();
         _deleteListButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
@@ -307,29 +330,85 @@ public class DashboardPage : ContentPage, IQueryAttributable
         _resetListButton = new Button { Text = "Reset", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _resetListButton.Clicked += async (_, _) => await ResetCurrentListAsync();
 
-        _newItemEntry = new Entry { Placeholder = "New item name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
-        _addItemButton = new Button { Text = "+ Add", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _addItemButton.Clicked += async (_, _) => await AddItemAsync();
-
+        // NEW: Instantiate previously null UI controls (preferences + items + child creation + filter placeholder)
         _themeLabel = new Label { Text = "Light", VerticalTextAlignment = TextAlignment.Center };
         _themeSwitch = new Switch();
         _themeSwitch.Toggled += async (s, e) => await OnThemeToggledAsync(e.Value);
-        var themeRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } };
 
-        // Hide Completed control
         _hideCompletedSwitch = new Switch();
         _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value);
-        var hideCompletedRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } };
 
-        // Placeholder when filter hides everything
-        _emptyFilteredLabel = new Label
+        _emptyFilteredLabel = new Label { IsVisible = false, TextColor = Colors.Gray, FontSize = 12 };
+
+        _newItemEntry = new Entry { Placeholder = "New item name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
+        _newItemEntry.TextChanged += (s, e) => { if (_addItemButton != null) _addItemButton.IsEnabled = !string.IsNullOrWhiteSpace(_newItemEntry.Text); };
+        _addItemButton = new Button { Text = "Add", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false };
+        _addItemButton.Clicked += async (_, __) => await AddItemAsync();
+
+        _newChildEntry = new Entry { Placeholder = "New child name", Style = (Style)Application.Current!.Resources["FilledEntry"], IsVisible = false };
+        _newChildEntry.TextChanged += (s, e) => UpdateChildControls();
+        _addChildButton = new Button { Text = "Add Child", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false, IsVisible = false };
+        _addChildButton.Clicked += async (_, __) => await AddChildItemAsync();
+
+        _listsView = new CollectionView
         {
-            Text = "All items are completed and hidden.",
-            Opacity = 0.7,
-            IsVisible = false,
-            HorizontalTextAlignment = TextAlignment.Center,
-            Margin = new Thickness(0, 6)
+            SelectionMode = SelectionMode.Single,
+            ItemsSource = _listsObservable,
+            ItemTemplate = new DataTemplate(() =>
+            {
+                var border = new Border
+                {
+                    StrokeThickness = 1,
+                    StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(12) },
+                    Padding = new Thickness(10,6),
+                    Margin = new Thickness(0,4)
+                };
+                var name = new Label { FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center };
+                name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
+                var daily = new Border { BackgroundColor = (Color)Application.Current!.Resources["Primary"], StrokeThickness = 0, Padding = new Thickness(6,2), StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }, Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White } };
+                daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
+                var shareBtn = new Button { Text = "Share", FontSize = 12, Padding = new Thickness(10,4), Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+                shareBtn.Clicked += async (s,e)=>{
+                    if (border.BindingContext is ListRecord lr)
+                    {
+                        await OpenShareAsync(lr);
+                    }
+                };
+                var tapSelect = new TapGestureRecognizer();
+                tapSelect.Tapped += (s,e)=>{
+                    if (border.BindingContext is ListRecord lr)
+                    {
+                        if (_selectedListId == lr.Id) return;
+                        _selectedListId = lr.Id;
+                        UpdateAllListVisuals();
+                        _ = RefreshItemsAsync();
+                        SyncDailyCheckboxWithSelectedList();
+                        if (_listsView != null) _listsView.SelectedItem = lr;
+                    }
+                };
+                border.GestureRecognizers.Add(tapSelect);
+                border.Content = new HorizontalStackLayout { Spacing = 8, Children = { name, daily, shareBtn } };
+                border.BindingContextChanged += (s,e)=> {
+                    if (!_listItemBorders.Contains(border)) _listItemBorders.Add(border);
+                    ApplyListVisual(border);
+                };
+                return border;
+            })
         };
+        _listsView.SelectionChanged += async (s, e) =>
+        {
+            var lr = e.CurrentSelection.FirstOrDefault() as ListRecord;
+            if (lr == null) return;
+            if (_selectedListId == lr.Id) return; // already selected
+            _selectedListId = lr.Id;
+            UpdateAllListVisuals();
+            await RefreshItemsAsync();
+            SyncDailyCheckboxWithSelectedList();
+        };
+
+        var listsHeader = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
+        listsHeader.Add(new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] });
+        listsHeader.Add(_completedBadge, 1, 0);
 
         _listsCard = new Border
         {
@@ -341,8 +420,8 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 Padding = 16,
                 Children =
                 {
-                    new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] },
-                    _listsPicker,
+                    listsHeader,
+                    _listsView,
                     dailyRow,
                     new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton, _resetListButton } }
                 }
@@ -350,6 +429,7 @@ public class DashboardPage : ContentPage, IQueryAttributable
         };
         _listsCard.Style = (Style)Application.Current!.Resources["CardBorder"];
 
+        // ITEMS PANEL (existing code retained) ----------------------
         // Reusable template that binds background/stroke via converters so it tracks theme
         _itemViewTemplate = new DataTemplate(() =>
         {
@@ -648,12 +728,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
             ItemTemplate = _itemViewTemplate
         };
 
-        // Child creation controls (hidden until item selected)
-        _newChildEntry = new Entry { Placeholder = "New child name", Style = (Style)Application.Current!.Resources["FilledEntry"], IsVisible = false };
-        _newChildEntry.TextChanged += (_, __) => UpdateChildControls();
-        _addChildButton = new Button { Text = "+ Sub-item", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, IsVisible = false, IsEnabled = false };
-        _addChildButton.Clicked += async (_, __) => await AddChildItemAsync();
-
         // Add move controls for accessibility
         _moveUpButton = new Button { Text = "Move Up", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, IsEnabled = false };
         _moveUpButton.Clicked += async (_, __) => await MoveSelectedAsync(-1);
@@ -679,7 +753,6 @@ public class DashboardPage : ContentPage, IQueryAttributable
                 Children =
                 {
                     itemsHeader,
-                    hideCompletedRow,
                     _emptyFilteredLabel,
                     _itemsView,
                     new HorizontalStackLayout { Spacing = 8, Children = { _newItemEntry, _addItemButton } },
@@ -693,34 +766,19 @@ public class DashboardPage : ContentPage, IQueryAttributable
         {
             StrokeThickness = 1,
             StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) },
-            Content = new VerticalStackLayout { Spacing = 12, Padding = 16, Children = { new Label { Text = "Preferences", Style = (Style)Application.Current!.Resources["SectionTitle"] }, new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } } } }
+            Content = new VerticalStackLayout
+            {
+                Spacing = 12,
+                Padding = 16,
+                Children =
+                {
+                    new Label { Text = "Preferences", Style = (Style)Application.Current!.Resources["SectionTitle"] },
+                    new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } },
+                    new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } }
+                }
+            }
         };
         prefsCard.Style = (Style)Application.Current!.Resources["CardBorder"]; // after creation
-
-        if (_listsCard == null)
-        {
-            var listsHeader = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
-            listsHeader.Add(new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] });
-            listsHeader.Add(_completedBadge, 1, 0);
-            _listsCard = new Border
-            {
-                StrokeThickness = 1,
-                StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) },
-                Content = new VerticalStackLayout
-                {
-                    Spacing = 12,
-                    Padding = 16,
-                    Children =
-                    {
-                        listsHeader,
-                        _listsPicker,
-                        new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Daily" }, _dailyCheck } },
-                        new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton, _resetListButton } }
-                    }
-                }
-            };
-            _listsCard.Style = (Style)Application.Current!.Resources["CardBorder"];
-        }
 
         _twoPaneGrid = new Grid { ColumnSpacing = 16, RowSpacing = 16 };
         _twoPaneGrid.Add(_listsCard, 0, 0); _twoPaneGrid.Add(_itemsCard, 1, 0);
@@ -900,10 +958,37 @@ public class DashboardPage : ContentPage, IQueryAttributable
     }
 
     private async Task RefreshListsAsync()
-    { if (_userId == null) return; _lists = await _db.GetListsAsync(_userId.Value); _listsPicker.ItemsSource = _lists.Count == 0 ? new List<ListRecord>() : _lists.ToList(); _listsPicker.SelectedIndex = _lists.Count > 0 ? 0 : -1; SyncDailyCheckboxWithSelectedList(); }
+    {
+        if (_userId == null) return;
+        _lists = await _db.GetListsAsync(_userId.Value);
+        _listsObservable.Clear();
+        foreach (var l in _lists) _listsObservable.Add(l);
+        if (_lists.Count == 0)
+        {
+            _selectedListId = null; _items.Clear(); _allItems.Clear(); UpdateCompletedBadge();
+            if (_listsView != null) _listsView.SelectedItem = null;
+        }
+        else
+        {
+            if (_selectedListId == null || !_lists.Any(x => x.Id == _selectedListId))
+                _selectedListId = _lists.First().Id;
+            if (_listsView != null)
+            {
+                var sel = _lists.FirstOrDefault(x => x.Id == _selectedListId);
+                _listsView.SelectedItem = sel;
+            }
+            SyncDailyCheckboxWithSelectedList();
+            await RefreshItemsAsync();
+        }
+        UpdateAllListVisuals();
+    }
 
     private void SyncDailyCheckboxWithSelectedList()
-    { var id = SelectedListId; _suppressDailyEvent = true; if (id == null) _dailyCheck.IsChecked = false; else { var lr = _lists.FirstOrDefault(x => x.Id == id); _dailyCheck.IsChecked = lr?.IsDaily ?? false; } _suppressDailyEvent = false; }
+    {
+        var id = SelectedListId; _suppressDailyEvent = true;
+        if (id == null) _dailyCheck.IsChecked = false; else { var lr = _lists.FirstOrDefault(x => x.Id == id); _dailyCheck.IsChecked = lr?.IsDaily ?? false; }
+        _suppressDailyEvent = false;
+    }
 
     private async Task OnDailyToggledAsync(bool isChecked)
     { if (_suppressDailyEvent) return; var id = SelectedListId; if (id == null) return; await _db.SetListDailyAsync(id.Value, isChecked); var lr = _lists.FirstOrDefault(x => x.Id == id.Value); if (lr != null) { var m = _lists.ToList(); var idx = m.FindIndex(x => x.Id == id.Value); if (idx >= 0) { m[idx] = new ListRecord(lr.Id, lr.Name, isChecked); _lists = m; } } }
@@ -987,7 +1072,10 @@ public class DashboardPage : ContentPage, IQueryAttributable
             else
             {
                 var current = _allItems.FirstOrDefault(x => x.Id == _selectedItem.Id);
-                if (current != null) SetSingleSelection(current); else ClearSelectionAndUi();
+                if (current != null)
+                    SetSingleSelection(current);
+                else
+                    ClearSelectionAndUi();
             }
         }
         else ClearSelectionAndUi();
@@ -1220,5 +1308,24 @@ public class DashboardPage : ContentPage, IQueryAttributable
             }
         }
         RebuildVisibleItems();
+    }
+
+    private async Task OpenShareAsync(ListRecord lr)
+    {
+        try
+        {
+            if (_userId == null)
+            {
+                await DisplayAlert("Share", "User context missing.", "OK");
+                return;
+            }
+            // Use new constructor with db and user
+            var page = new ShareListPage(_db, lr, _userId.Value);
+            await Navigation.PushModalAsync(page);
+        }
+        catch (Exception ex)
+        {
+            await DisplayAlert("Share", $"Unable to open share dialog: {ex.Message}", "OK");
+        }
     }
 } // end DashboardPage class
