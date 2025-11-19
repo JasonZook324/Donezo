@@ -60,7 +60,7 @@ public record ListRecord(int Id, string Name, bool IsDaily);
 public record SharedListRecord(int Id, string Name, bool IsDaily, string Role); // new record for shared lists with role
 public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int? ParentItemId, bool HasChildren, int ChildrenCount, int IncompleteChildrenCount, int Level, string SortKey, int Order);
 public record ShareCodeRecord(int Id, int ListId, string Code, string Role, DateTime? ExpirationUtc, int MaxRedeems, int RedeemedCount, bool IsDeleted);
-public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked);
+public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked, string? Code);
 
 public partial class NeonDbService : INeonDbService
 {
@@ -155,6 +155,9 @@ public partial class NeonDbService : INeonDbService
         // Initialize owner_user_id where null
         await using (var init = new NpgsqlCommand("update lists set owner_user_id=user_id where owner_user_id is null", conn))
         { await init.ExecuteNonQueryAsync(ct); }
+        // New: add via_code to memberships for attribution
+        await using (var addViaCode = new NpgsqlCommand("alter table if exists list_memberships add column if not exists via_code text", conn))
+        { await addViaCode.ExecuteNonQueryAsync(ct); }
         _schemaEnsured = true;
     }
 
@@ -272,7 +275,7 @@ public partial class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("insert into lists(user_id,name,is_daily,last_reset_date) values(@u,@n,@d,current_date) returning id", conn);
+        await using var cmd = new NpgsqlCommand("insert into lists(user_id,name,is_daily,last_reset_date,owner_user_id) values(@u,@n,@d,current_date,@u) returning id", conn);
         cmd.Parameters.AddWithValue("u", userId);
         cmd.Parameters.AddWithValue("n", name);
         cmd.Parameters.AddWithValue("d", isDaily);
@@ -1028,23 +1031,86 @@ public partial class NeonDbService : INeonDbService
 
     public async Task<bool> UpdateShareCodeRoleAsync(int shareCodeId, string newRole, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(newRole)) return false; await EnsureSchemaAsync(ct);
-        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        int? roleId = null; await using (var getRole = new NpgsqlCommand("select id from roles where name=@r", conn)) { getRole.Parameters.AddWithValue("r", newRole); var rObj = await getRole.ExecuteScalarAsync(ct); roleId = rObj as int?; }
+        if (string.IsNullOrWhiteSpace(newRole)) return false;
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        // Validate target role exists and get its id
+        int? roleId = null;
+        await using (var getRole = new NpgsqlCommand("select id from roles where name=@r", conn))
+        {
+            getRole.Parameters.AddWithValue("r", newRole);
+            var rObj = await getRole.ExecuteScalarAsync(ct);
+            roleId = rObj as int?;
+        }
         if (roleId == null) return false;
+
+        // Determine current role and list_id for this share code
         var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct);
-        string sql = hasRoleCol ? "update list_share_codes set role=@r, role_id=@rid where id=@i" : "update list_share_codes set role_id=@rid where id=@i";
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        if (hasRoleCol) cmd.Parameters.AddWithValue("r", newRole);
-        cmd.Parameters.AddWithValue("rid", roleId.Value);
-        cmd.Parameters.AddWithValue("i", shareCodeId);
-        return await cmd.ExecuteNonQueryAsync(ct) == 1;
+        int listId;
+        string oldRole;
+        string readSql = hasRoleCol
+            ? "select list_id, role from list_share_codes where id=@i"
+            : "select sc.list_id, r.name as role from list_share_codes sc left join roles r on r.id=sc.role_id where sc.id=@i";
+        await using (var readCmd = new NpgsqlCommand(readSql, conn))
+        {
+            readCmd.Parameters.AddWithValue("i", shareCodeId);
+            await using var r = await readCmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return false;
+            listId = r.GetInt32(0);
+            oldRole = r.GetString(1);
+        }
+        if (string.Equals(oldRole, newRole, StringComparison.OrdinalIgnoreCase))
+            return true; // nothing to do
+
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        try
+        {
+            // Update the share code's role
+            string sql = hasRoleCol
+                ? "update list_share_codes set role=@r, role_id=@rid where id=@i"
+                : "update list_share_codes set role_id=@rid where id=@i";
+            await using (var cmd = new NpgsqlCommand(sql, conn, tx))
+            {
+                if (hasRoleCol) cmd.Parameters.AddWithValue("r", newRole);
+                cmd.Parameters.AddWithValue("rid", roleId.Value);
+                cmd.Parameters.AddWithValue("i", shareCodeId);
+                if (await cmd.ExecuteNonQueryAsync(ct) != 1)
+                {
+                    await tx.RollbackAsync(ct);
+                    return false;
+                }
+            }
+
+            // Propagate role change to memberships created with the old role for this list
+            // Without a direct link between membership and code, we align all memberships with matching old role on the same list.
+            const string updMembersSql = "update list_memberships set role=@newRole where list_id=@l and role=@oldRole";
+            await using (var updMembers = new NpgsqlCommand(updMembersSql, conn, tx))
+            {
+                updMembers.Parameters.AddWithValue("newRole", newRole);
+                updMembers.Parameters.AddWithValue("l", listId);
+                updMembers.Parameters.AddWithValue("oldRole", oldRole);
+                await updMembers.ExecuteNonQueryAsync(ct);
+            }
+
+            await tx.CommitAsync(ct);
+            return true;
+        }
+        catch
+        {
+            try { await tx.RollbackAsync(ct); } catch { }
+            return false;
+        }
     }
 
     public async Task<bool> SoftDeleteShareCodeAsync(int shareCodeId, CancellationToken ct = default)
     {
-        await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("update list_share_codes set is_deleted=true where id=@i", conn); cmd.Parameters.AddWithValue("i", shareCodeId);
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("update list_share_codes set is_deleted=true where id=@i", conn);
+        cmd.Parameters.AddWithValue("i", shareCodeId);
         return await cmd.ExecuteNonQueryAsync(ct) == 1;
     }
 
@@ -1064,19 +1130,19 @@ public partial class NeonDbService : INeonDbService
             codeId = r.GetInt32(0); role = r.GetString(1); exp = r.IsDBNull(2) ? null : r.GetDateTime(2); maxRedeems = r.GetInt32(3); redeemed = r.GetInt32(4); isDeleted = r.GetBoolean(5); roleId = r.IsDBNull(6) ? null : r.GetInt32(6);
         }
         if (isDeleted) return (false,null); if (exp != null && exp.Value < DateTime.UtcNow) return (false,null); if (maxRedeems>0 && redeemed>=maxRedeems) return (false,null);
-        int? membershipId = null; bool revoked = false; DateTime joined = DateTime.UtcNow; string username="";
-        await using (var chk = new NpgsqlCommand("select m.id,m.revoked,u.username,m.joined_at,m.role from list_memberships m join users u on u.id=m.user_id where m.list_id=@l and m.user_id=@u", conn))
-        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", userId); await using var rr = await chk.ExecuteReaderAsync(ct); if (await rr.ReadAsync(ct)) { membershipId = rr.GetInt32(0); revoked = rr.GetBoolean(1); username= rr.GetString(2); joined = rr.GetDateTime(3); role = rr.GetString(4); if (revoked) return (false,null); } }
+        int? membershipId = null; bool revoked = false; DateTime joined = DateTime.UtcNow; string username=""; string? viaCodeExisting = null;
+        await using (var chk = new NpgsqlCommand("select m.id,m.revoked,u.username,m.joined_at,m.role,m.via_code from list_memberships m join users u on u.id=m.user_id where m.list_id=@l and m.user_id=@u", conn))
+        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", userId); await using var rr = await chk.ExecuteReaderAsync(ct); if (await rr.ReadAsync(ct)) { membershipId = rr.GetInt32(0); revoked = rr.GetBoolean(1); username= rr.GetString(2); joined = rr.GetDateTime(3); role = rr.GetString(4); viaCodeExisting = rr.IsDBNull(5) ? null : rr.GetString(5); if (revoked) return (false,null); } }
         await using var tx = await conn.BeginTransactionAsync(ct);
         if (membershipId == null)
         {
-            await using (var ins = new NpgsqlCommand("insert into list_memberships(list_id,user_id,role) values(@l,@u,@r) returning id", conn, tx))
-            { ins.Parameters.AddWithValue("l", listId); ins.Parameters.AddWithValue("u", userId); ins.Parameters.AddWithValue("r", role); var idObj = await ins.ExecuteScalarAsync(ct); membershipId = idObj as int?; }
+            await using (var ins = new NpgsqlCommand("insert into list_memberships(list_id,user_id,role,via_code) values(@l,@u,@r,@code) returning id", conn, tx))
+            { ins.Parameters.AddWithValue("l", listId); ins.Parameters.AddWithValue("u", userId); ins.Parameters.AddWithValue("r", role); ins.Parameters.AddWithValue("code", code); var idObj = await ins.ExecuteScalarAsync(ct); membershipId = idObj as int?; }
             await using (var updCode = new NpgsqlCommand("update list_share_codes set redeemed_count=redeemed_count+1 where id=@i", conn, tx)) { updCode.Parameters.AddWithValue("i", codeId); await updCode.ExecuteNonQueryAsync(ct); }
             await using (var getUser = new NpgsqlCommand("select username from users where id=@u", conn, tx)) { getUser.Parameters.AddWithValue("u", userId); var uObj = await getUser.ExecuteScalarAsync(ct); username = uObj as string ?? ""; }
         }
         await tx.CommitAsync(ct);
-        var record = new MembershipRecord(membershipId!.Value, listId, userId, username, role, joined, false);
+        var record = new MembershipRecord(membershipId!.Value, listId, userId, username, role, joined, false, membershipId == null ? code : viaCodeExisting);
         return (true, record);
     }
 
@@ -1100,19 +1166,19 @@ public partial class NeonDbService : INeonDbService
         if (isDeleted) return (false, null, null, null);
         if (exp != null && exp.Value < DateTime.UtcNow) return (false, null, null, null);
         if (maxRedeems > 0 && redeemed >= maxRedeems) return (false, null, null, null);
-        int? membershipId = null; bool revoked = false; DateTime joined = DateTime.UtcNow; string username=""; string existingRole = role;
-        await using (var chk = new NpgsqlCommand("select m.id,m.revoked,u.username,m.joined_at,m.role from list_memberships m join users u on u.id=m.user_id where m.list_id=@l and m.user_id=@u", conn))
-        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", userId); await using var rr = await chk.ExecuteReaderAsync(ct); if (await rr.ReadAsync(ct)) { membershipId = rr.GetInt32(0); revoked = rr.GetBoolean(1); username = rr.GetString(2); joined = rr.GetDateTime(3); existingRole = rr.GetString(4); if (revoked) return (false, null, null, null); } }
+        int? membershipId = null; bool revoked = false; DateTime joined = DateTime.UtcNow; string username=""; string existingRole = role; string? viaCodeExisting = null;
+        await using (var chk = new NpgsqlCommand("select m.id,m.revoked,u.username,m.joined_at,m.role,m.via_code from list_memberships m join users u on u.id=m.user_id where m.list_id=@l and m.user_id=@u", conn))
+        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", userId); await using var rr = await chk.ExecuteReaderAsync(ct); if (await rr.ReadAsync(ct)) { membershipId = rr.GetInt32(0); revoked = rr.GetBoolean(1); username = rr.GetString(2); joined = rr.GetDateTime(3); role = rr.GetString(4); viaCodeExisting = rr.IsDBNull(5) ? null : rr.GetString(5); if (revoked) return (false, null, null, null); } }
         await using var tx = await conn.BeginTransactionAsync(ct);
         if (membershipId == null)
         {
-            await using (var ins = new NpgsqlCommand("insert into list_memberships(list_id,user_id,role) values(@l,@u,@r) returning id", conn, tx))
-            { ins.Parameters.AddWithValue("l", listId); ins.Parameters.AddWithValue("u", userId); ins.Parameters.AddWithValue("r", role); var idObj = await ins.ExecuteScalarAsync(ct); membershipId = idObj as int?; }
+            await using (var ins = new NpgsqlCommand("insert into list_memberships(list_id,user_id,role,via_code) values(@l,@u,@r,@code) returning id", conn, tx))
+            { ins.Parameters.AddWithValue("l", listId); ins.Parameters.AddWithValue("u", userId); ins.Parameters.AddWithValue("r", role); ins.Parameters.AddWithValue("code", code); var idObj = await ins.ExecuteScalarAsync(ct); membershipId = idObj as int?; }
             await using (var updCode = new NpgsqlCommand("update list_share_codes set redeemed_count=redeemed_count+1 where id=@i", conn, tx)) { updCode.Parameters.AddWithValue("i", codeId); await updCode.ExecuteNonQueryAsync(ct); }
             await using (var getUser = new NpgsqlCommand("select username from users where id=@u", conn, tx)) { getUser.Parameters.AddWithValue("u", userId); var uObj = await getUser.ExecuteScalarAsync(ct); username = uObj as string ?? string.Empty; }
         }
         await tx.CommitAsync(ct);
-        var membership = new MembershipRecord(membershipId!.Value, listId, userId, username, membershipId == null ? existingRole : role, joined, false);
+        var membership = new MembershipRecord(membershipId!.Value, listId, userId, username, membershipId == null ? existingRole : role, joined, false, membershipId == null ? code : viaCodeExisting);
         var listRecord = new ListRecord(listId, listName, isDaily);
         return (true, listId, listRecord, membership);
     }
@@ -1122,10 +1188,10 @@ public partial class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         var list = new List<MembershipRecord>();
         await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        var sql = "select m.id,m.list_id,m.user_id,u.username,m.role,m.joined_at,m.revoked from list_memberships m join users u on u.id=m.user_id where m.list_id=@l order by m.joined_at";
+        var sql = "select m.id,m.list_id,m.user_id,u.username,m.role,m.joined_at,m.revoked,m.via_code from list_memberships m join users u on u.id=m.user_id where m.list_id=@l order by m.joined_at";
         await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("l", listId);
         await using var r = await cmd.ExecuteReaderAsync(ct);
-        while (await r.ReadAsync(ct)) list.Add(new MembershipRecord(r.GetInt32(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3), r.GetString(4), r.GetDateTime(5), r.GetBoolean(6)));
+        while (await r.ReadAsync(ct)) list.Add(new MembershipRecord(r.GetInt32(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3), r.GetString(4), r.GetDateTime(5), r.GetBoolean(6), r.IsDBNull(7) ? null : r.GetString(7)));
         return list;
     }
 
@@ -1142,14 +1208,67 @@ public partial class NeonDbService : INeonDbService
     public async Task<bool> TransferOwnershipAsync(int listId, int newOwnerUserId, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct);
-        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using (var chk = new NpgsqlCommand("select 1 from list_memberships where list_id=@l and user_id=@u and revoked=false", conn))
-        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", newOwnerUserId); if (await chk.ExecuteScalarAsync(ct) == null) return false; }
-        await using var cmd = new NpgsqlCommand("update lists set owner_user_id=@u where id=@l", conn);
-        cmd.Parameters.AddWithValue("u", newOwnerUserId);
-        cmd.Parameters.AddWithValue("l", listId);
-        return await cmd.ExecuteNonQueryAsync(ct) == 1;
+ await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+
+    // Fetch current owner
+    int? prevOwnerUserId = null;
+    await using (var getOwner = new NpgsqlCommand("select owner_user_id from lists where id=@l", conn))
+    { 
+        getOwner.Parameters.AddWithValue("l", listId); 
+        var oRes = await getOwner.ExecuteScalarAsync(ct); 
+        if (oRes is int po) prevOwnerUserId = po; else return false; 
     }
+
+    // Short-circuit if same owner
+    if (prevOwnerUserId == newOwnerUserId) return true;
+
+    // Validate new owner is active member
+    await using (var chk = new NpgsqlCommand("select 1 from list_memberships where list_id=@l and user_id=@u and revoked=false", conn))
+    { 
+        chk.Parameters.AddWithValue("l", listId); 
+        chk.Parameters.AddWithValue("u", newOwnerUserId); 
+        if (await chk.ExecuteScalarAsync(ct) == null) return false; 
+    }
+
+    await using var tx = await conn.BeginTransactionAsync(ct);
+    try
+    {
+        // Ensure previous owner keeps non-revoked membership with fallback role if losing ownership
+        if (prevOwnerUserId != null)
+        {
+            const string fallbackRole = "Contributor";
+            var upsertSql = @"insert into list_memberships(list_id,user_id,role,revoked) values(@l,@prev,@role,false)
+                              on conflict (list_id,user_id) do update set revoked=false,
+                              role = case when list_memberships.revoked then excluded.role else list_memberships.role end";
+            await using (var upsert = new NpgsqlCommand(upsertSql, conn, tx))
+            { 
+                upsert.Parameters.AddWithValue("l", listId); 
+                upsert.Parameters.AddWithValue("prev", prevOwnerUserId.Value); 
+                upsert.Parameters.AddWithValue("role", fallbackRole); 
+                await upsert.ExecuteNonQueryAsync(ct); 
+            }
+
+            // Note: removed auto-created redeemed share code (max_redeems=1) for previous owner.
+            // The previous owner remains a member via the upsert above.
+        }
+
+        int rows;
+        await using (var setOwner = new NpgsqlCommand("update lists set owner_user_id=@u where id=@l", conn, tx))
+        { 
+            setOwner.Parameters.AddWithValue("u", newOwnerUserId); 
+            setOwner.Parameters.AddWithValue("l", listId); 
+            rows = await setOwner.ExecuteNonQueryAsync(ct); 
+        }
+
+        await tx.CommitAsync(ct);
+        return rows == 1;
+    }
+    catch
+    {
+        try { await tx.RollbackAsync(ct); } catch { }
+        return false;
+    }
+}
 
     public async Task<int?> GetListOwnerUserIdAsync(int listId, CancellationToken ct = default)
     {

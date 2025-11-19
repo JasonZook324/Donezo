@@ -57,6 +57,13 @@ public class ShareListPage : ContentPage
         try
         {
             _ownerUserId = await _db.GetListOwnerUserIdAsync(_list.Id);
+            // Guard: if current user is not the owner, close immediately
+            if (_ownerUserId == null || _ownerUserId.Value != _currentUserId)
+            {
+                await DisplayAlert("Share", "Only the list owner can manage sharing.", "OK");
+                await Navigation.PopModalAsync();
+                return;
+            }
             await LoadCodesAsync();
             await LoadMembershipsAsync();
         }
@@ -133,21 +140,36 @@ public class ShareListPage : ContentPage
                 var copyBtn = new Button { Text = "Copy", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, Padding = new Thickness(8, 4) };
                 copyBtn.Clicked += async (s, e) => { if (((BindableObject)s).BindingContext is ShareCodeVm vm) { try { await Clipboard.Default.SetTextAsync(vm.Code); } catch { } } };
                 var rolePicker = new Picker { WidthRequest = 130, FontSize = 12, ItemsSource = new[] { "Viewer", "Contributor" } };
-                rolePicker.SetBinding(Picker.SelectedItemProperty, nameof(ShareCodeVm.Role), BindingMode.TwoWay);
-                rolePicker.SelectedIndexChanged += async (s, e) =>
+                // Remove TwoWay binding to avoid pre-setting vm.Role before we compare/change.
+                rolePicker.BindingContextChanged += (s, e) =>
                 {
                     if (((BindableObject)s).BindingContext is ShareCodeVm vm)
                     {
-                        if (vm.ShareCodeId != null)
+                        // Initialize picker selection from VM role
+                        rolePicker.SelectedItem = vm.Role;
+                    }
+                };
+                rolePicker.SelectedIndexChanged += async (s, e) =>
+                {
+                    if (((BindableObject)s).BindingContext is ShareCodeVm vm && vm.ShareCodeId != null)
+                    {
+                        var newRole = rolePicker.SelectedItem as string;
+                        if (string.IsNullOrWhiteSpace(newRole)) return;
+                        var oldRole = vm.Role;
+                        if (newRole == oldRole) return; // no change
+                        var ok = await _db.UpdateShareCodeRoleAsync(vm.ShareCodeId.Value, newRole);
+                        if (!ok)
                         {
-                            var newRole = rolePicker.SelectedItem as string ?? vm.Role;
-                            if (newRole != vm.Role)
-                            {
-                                var ok = await _db.UpdateShareCodeRoleAsync(vm.ShareCodeId.Value, newRole);
-                                if (!ok) await DisplayAlert("Role", "Failed to update role.", "OK");
-                                else vm.Role = newRole;
-                            }
+                            await DisplayAlert("Role", "Failed to update role.", "OK");
+                            // revert picker selection
+                            rolePicker.SelectedItem = oldRole;
+                            return;
                         }
+                        // update model
+                        vm.Role = newRole;
+                        // Refresh codes and memberships to reflect change everywhere
+                        await LoadCodesAsync();
+                        await LoadMembershipsAsync();
                     }
                 };
                 var expLabel = new Label { FontSize = 12, TextColor = Colors.Gray };
@@ -231,7 +253,10 @@ public class ShareListPage : ContentPage
                         if (!confirm) return;
                         var ok = await _db.TransferOwnershipAsync(_list.Id, vm.UserId);
                         if (!ok) { await DisplayAlert("Transfer", "Failed to transfer ownership.", "OK"); return; }
-                        _ownerUserId = vm.UserId; await LoadMembershipsAsync();
+                        // Notify Dashboard to refresh grouping; previous owner now becomes shared member
+                        try { MessagingCenter.Send(this, "OwnershipTransferred", _list.Id); } catch { }
+                        // Close modal only (no reopen) – dashboard will show list under shared section.
+                        try { await Navigation.PopModalAsync(); } catch { }
                     }
                 };
                 var revokedBadge = new Border

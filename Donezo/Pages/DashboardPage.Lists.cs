@@ -126,7 +126,7 @@ public partial class DashboardPage
             StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }, Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White }
         };
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
-        var shareBtn = new Button { Text = "Share", FontSize = 12, Padding = new Thickness(10, 4), Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        var shareBtn = new Button { Text = "Share", FontSize = 12, Padding = new Thickness(10, 4), Style = (Style)Application.Current!.Resources["OutlinedButton"], IsVisible = !isShared };
         shareBtn.Clicked += async (s, e) =>
         {
             if (border.BindingContext is ListRecord lr) await OpenShareAsync(lr);

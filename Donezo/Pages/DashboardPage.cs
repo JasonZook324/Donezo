@@ -199,12 +199,25 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     protected override void OnAppearing()
     {
         base.OnAppearing();
+        // Subscribe to ownership transfer notifications from ShareListPage to refresh grouping
+        MessagingCenter.Subscribe<ShareListPage, int>(this, "OwnershipTransferred", async (sender, listId) =>
+        {
+            try
+            {
+                await RefreshListsAsync();
+                _selectedListId = listId;
+                UpdateAllListSelectionVisuals();
+            }
+            catch { }
+        });
         StartPolling();
     }
 
     protected override void OnDisappearing()
     {
         base.OnDisappearing();
+        // Unsubscribe to avoid leaks
+        MessagingCenter.Unsubscribe<ShareListPage, int>(this, "OwnershipTransferred");
         StopPolling();
     }
 
@@ -607,6 +620,13 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             if (_userId == null)
             {
                 await DisplayAlert("Share", "User context missing.", "OK");
+                return;
+            }
+            // Only allow owners to access share options
+            var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id);
+            if (ownerId == null || ownerId.Value != _userId.Value)
+            {
+                await DisplayAlert("Share", "Only the list owner can manage sharing.", "OK");
                 return;
             }
             var page = new ShareListPage(_db, lr, _userId.Value);
