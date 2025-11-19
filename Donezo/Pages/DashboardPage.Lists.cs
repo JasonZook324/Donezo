@@ -30,6 +30,7 @@ public partial class DashboardPage
     // Redeem share code controls
     private Entry _redeemCodeEntry = null!;
     private Button _redeemCodeButton = null!;
+    private Label _sharedEmptyLabel = null!; // placeholder label when no shared lists
 
     private Border BuildListsCard()
     {
@@ -65,7 +66,8 @@ public partial class DashboardPage
         };
         _sharedListsView.SelectionChanged += async (s, e) => HandleSelectionChanged(e.CurrentSelection.FirstOrDefault());
 
-        _sharedHeading = new Label { Text = "Shared With Me", Style = (Style)Application.Current!.Resources["SectionSubTitle"], Margin = new Thickness(0, 12, 0, 0), IsVisible = false };
+        _sharedHeading = new Label { Text = "Shared with me", Style = (Style)Application.Current!.Resources["SectionSubTitle"], Margin = new Thickness(0, 12, 0, 0), IsVisible = true };
+        _sharedEmptyLabel = new Label { Text = "No shared lists yet.", FontSize = 12, TextColor = Colors.Gray, IsVisible = false };
 
         var listsHeader = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
         listsHeader.Add(new Label { Text = "Lists", Style = (Style)Application.Current!.Resources["SectionTitle"] });
@@ -84,6 +86,7 @@ public partial class DashboardPage
                     listsHeader,
                     _listsView,
                     _sharedHeading,
+                    _sharedEmptyLabel,
                     _sharedListsView,
                     new Label { Text = "Redeem Code", FontAttributes = FontAttributes.Bold },
                     new HorizontalStackLayout { Spacing = 8, Children = { _redeemCodeEntry, _redeemCodeButton } },
@@ -214,8 +217,10 @@ public partial class DashboardPage
         foreach (var o in _ownedLists) _listsObservable.Add(o);
         foreach (var s in _sharedLists) _sharedListsObservable.Add(s);
 
-        _sharedHeading.IsVisible = _sharedListsObservable.Count > 0;
-        _sharedListsView.IsVisible = _sharedListsObservable.Count > 0;
+        // Show/hide shared list collection but keep heading always visible
+        var hasShared = _sharedListsObservable.Count > 0;
+        _sharedListsView.IsVisible = hasShared;
+        _sharedEmptyLabel.IsVisible = !hasShared;
 
         var allIds = _ownedLists.Select(x => x.Id).Concat(_sharedLists.Select(x => x.Id)).ToHashSet();
         if (_selectedListId == null || !allIds.Contains(_selectedListId.Value))
