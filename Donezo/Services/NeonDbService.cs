@@ -17,7 +17,9 @@ public interface INeonDbService
     Task<bool> RegisterUserAsync(string username, string password, string email, string firstName, string lastName, CancellationToken ct = default);
     Task<bool> AuthenticateUserAsync(string username, string password, CancellationToken ct = default);
     Task<int?> GetUserIdAsync(string username, CancellationToken ct = default);
-    Task<IReadOnlyList<ListRecord>> GetListsAsync(int userId, CancellationToken ct = default);
+    Task<IReadOnlyList<ListRecord>> GetListsAsync(int userId, CancellationToken ct = default); // legacy: creator lists
+    Task<IReadOnlyList<ListRecord>> GetOwnedListsAsync(int userId, CancellationToken ct = default); // new owner-based lists
+    Task<IReadOnlyList<SharedListRecord>> GetSharedListsAsync(int userId, CancellationToken ct = default); // lists shared with user
     Task<int> CreateListAsync(int userId, string name, bool isDaily, CancellationToken ct = default);
     Task<int> AddItemAsync(int listId, string name, CancellationToken ct = default);
     Task<IReadOnlyList<ItemRecord>> GetItemsAsync(int listId, CancellationToken ct = default);
@@ -40,14 +42,14 @@ public interface INeonDbService
     Task<IDictionary<int, bool>> GetExpandedStatesAsync(int userId, int listId, CancellationToken ct = default);
     Task<(bool Ok, long NewRevision)> RenameItemAsync(int itemId, string newName, long expectedRevision, CancellationToken ct = default);
     Task<(bool Ok, long NewRevision, int Affected)> ResetSubtreeAsync(int rootItemId, long expectedRevision, CancellationToken ct = default);
-    // New: per-user per-list Hide Completed preference
     Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default);
     Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default);
     Task<IReadOnlyList<ShareCodeRecord>> GetShareCodesAsync(int listId, CancellationToken ct = default);
     Task<ShareCodeRecord?> CreateShareCodeAsync(int listId, string role, DateTime? expirationUtc, int maxRedeems, CancellationToken ct = default);
     Task<bool> UpdateShareCodeRoleAsync(int shareCodeId, string newRole, CancellationToken ct = default);
     Task<bool> SoftDeleteShareCodeAsync(int shareCodeId, CancellationToken ct = default);
-    Task<(bool Ok, MembershipRecord? Membership)> RedeemShareCodeAsync(int listId, int userId, string code, CancellationToken ct = default);
+    Task<(bool Ok, MembershipRecord? Membership)> RedeemShareCodeAsync(int listId, int userId, string code, CancellationToken ct = default); // legacy call
+    Task<(bool Ok, int? ListId, ListRecord? List, MembershipRecord? Membership)> RedeemShareCodeByCodeAsync(int userId, string code, CancellationToken ct = default); // new simplified redeem
     Task<IReadOnlyList<MembershipRecord>> GetMembershipsAsync(int listId, CancellationToken ct = default);
     Task<bool> RevokeMembershipAsync(int listId, int userId, CancellationToken ct = default);
     Task<bool> TransferOwnershipAsync(int listId, int newOwnerUserId, CancellationToken ct = default);
@@ -55,11 +57,12 @@ public interface INeonDbService
 }
 
 public record ListRecord(int Id, string Name, bool IsDaily);
+public record SharedListRecord(int Id, string Name, bool IsDaily, string Role); // new record for shared lists with role
 public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int? ParentItemId, bool HasChildren, int ChildrenCount, int IncompleteChildrenCount, int Level, string SortKey, int Order);
 public record ShareCodeRecord(int Id, int ListId, string Code, string Role, DateTime? ExpirationUtc, int MaxRedeems, int RedeemedCount, bool IsDeleted);
 public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked);
 
-public class NeonDbService : INeonDbService
+public partial class NeonDbService : INeonDbService
 {
     internal const int MaxDepth = 3;
     internal const int OrderStep = 1024;
@@ -231,6 +234,35 @@ public class NeonDbService : INeonDbService
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
             list.Add(new ListRecord(r.GetInt32(0), r.GetString(1), r.GetBoolean(2)));
+        return list;
+    }
+
+    public async Task<IReadOnlyList<ListRecord>> GetOwnedListsAsync(int userId, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        var list = new List<ListRecord>();
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("select id,name,is_daily from lists where owner_user_id=@u order by id", conn);
+        cmd.Parameters.AddWithValue("u", userId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            list.Add(new ListRecord(r.GetInt32(0), r.GetString(1), r.GetBoolean(2)));
+        return list;
+    }
+
+    public async Task<IReadOnlyList<SharedListRecord>> GetSharedListsAsync(int userId, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        var list = new List<SharedListRecord>();
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var sql = @"select l.id,l.name,l.is_daily,m.role from lists l join list_memberships m on m.list_id=l.id where m.user_id=@u and m.revoked=false and (l.owner_user_id is null or l.owner_user_id<>@u) order by l.id";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("u", userId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            list.Add(new SharedListRecord(r.GetInt32(0), r.GetString(1), r.GetBoolean(2), r.GetString(3)));
         return list;
     }
 
@@ -1048,60 +1080,98 @@ public class NeonDbService : INeonDbService
         return (true, record);
     }
 
+    public async Task<(bool Ok, int? ListId, ListRecord? List, MembershipRecord? Membership)> RedeemShareCodeByCodeAsync(int userId, string code, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        if (string.IsNullOrWhiteSpace(code)) return (false, null, null, null);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct);
+        string findSql = hasRoleCol
+            ? "select sc.id, sc.list_id, sc.role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted, l.name, l.is_daily from list_share_codes sc join lists l on l.id=sc.list_id where sc.code=@c"
+            : "select sc.id, sc.list_id, r.name as role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted, l.name, l.is_daily from list_share_codes sc left join roles r on r.id=sc.role_id join lists l on l.id=sc.list_id where sc.code=@c";
+        int codeId; int listId; string role; DateTime? exp; int maxRedeems; int redeemed; bool isDeleted; string listName; bool isDaily;
+        await using (var cmd = new NpgsqlCommand(findSql, conn))
+        {
+            cmd.Parameters.AddWithValue("c", code);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return (false, null, null, null);
+            codeId = r.GetInt32(0); listId = r.GetInt32(1); role = r.GetString(2); exp = r.IsDBNull(3) ? null : r.GetDateTime(3); maxRedeems = r.GetInt32(4); redeemed = r.GetInt32(5); isDeleted = r.GetBoolean(6); listName = r.GetString(7); isDaily = r.GetBoolean(8);
+        }
+        if (isDeleted) return (false, null, null, null);
+        if (exp != null && exp.Value < DateTime.UtcNow) return (false, null, null, null);
+        if (maxRedeems > 0 && redeemed >= maxRedeems) return (false, null, null, null);
+        int? membershipId = null; bool revoked = false; DateTime joined = DateTime.UtcNow; string username=""; string existingRole = role;
+        await using (var chk = new NpgsqlCommand("select m.id,m.revoked,u.username,m.joined_at,m.role from list_memberships m join users u on u.id=m.user_id where m.list_id=@l and m.user_id=@u", conn))
+        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", userId); await using var rr = await chk.ExecuteReaderAsync(ct); if (await rr.ReadAsync(ct)) { membershipId = rr.GetInt32(0); revoked = rr.GetBoolean(1); username = rr.GetString(2); joined = rr.GetDateTime(3); existingRole = rr.GetString(4); if (revoked) return (false, null, null, null); } }
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        if (membershipId == null)
+        {
+            await using (var ins = new NpgsqlCommand("insert into list_memberships(list_id,user_id,role) values(@l,@u,@r) returning id", conn, tx))
+            { ins.Parameters.AddWithValue("l", listId); ins.Parameters.AddWithValue("u", userId); ins.Parameters.AddWithValue("r", role); var idObj = await ins.ExecuteScalarAsync(ct); membershipId = idObj as int?; }
+            await using (var updCode = new NpgsqlCommand("update list_share_codes set redeemed_count=redeemed_count+1 where id=@i", conn, tx)) { updCode.Parameters.AddWithValue("i", codeId); await updCode.ExecuteNonQueryAsync(ct); }
+            await using (var getUser = new NpgsqlCommand("select username from users where id=@u", conn, tx)) { getUser.Parameters.AddWithValue("u", userId); var uObj = await getUser.ExecuteScalarAsync(ct); username = uObj as string ?? string.Empty; }
+        }
+        await tx.CommitAsync(ct);
+        var membership = new MembershipRecord(membershipId!.Value, listId, userId, username, membershipId == null ? existingRole : role, joined, false);
+        var listRecord = new ListRecord(listId, listName, isDaily);
+        return (true, listId, listRecord, membership);
+    }
+
     public async Task<IReadOnlyList<MembershipRecord>> GetMembershipsAsync(int listId, CancellationToken ct = default)
     {
-        await EnsureSchemaAsync(ct); var list = new List<MembershipRecord>(); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await EnsureSchemaAsync(ct);
+        var list = new List<MembershipRecord>();
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
         var sql = "select m.id,m.list_id,m.user_id,u.username,m.role,m.joined_at,m.revoked from list_memberships m join users u on u.id=m.user_id where m.list_id=@l order by m.joined_at";
-        await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("l", listId); await using var r = await cmd.ExecuteReaderAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("l", listId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct)) list.Add(new MembershipRecord(r.GetInt32(0), r.GetInt32(1), r.GetInt32(2), r.GetString(3), r.GetString(4), r.GetDateTime(5), r.GetBoolean(6)));
         return list;
     }
 
     public async Task<bool> RevokeMembershipAsync(int listId, int userId, CancellationToken ct = default)
     {
-        await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("update list_memberships set revoked=true where list_id=@l and user_id=@u", conn); cmd.Parameters.AddWithValue("l", listId); cmd.Parameters.AddWithValue("u", userId);
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("update list_memberships set revoked=true where list_id=@l and user_id=@u", conn);
+        cmd.Parameters.AddWithValue("l", listId);
+        cmd.Parameters.AddWithValue("u", userId);
         return await cmd.ExecuteNonQueryAsync(ct) == 1;
     }
 
     public async Task<bool> TransferOwnershipAsync(int listId, int newOwnerUserId, CancellationToken ct = default)
     {
-        await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        // Must have membership (not revoked)
-        await using (var chk = new NpgsqlCommand("select 1 from list_memberships where list_id=@l and user_id=@u and revoked=false", conn)) { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", newOwnerUserId); if (await chk.ExecuteScalarAsync(ct) == null) return false; }
-        await using var cmd = new NpgsqlCommand("update lists set owner_user_id=@u where id=@l", conn); cmd.Parameters.AddWithValue("u", newOwnerUserId); cmd.Parameters.AddWithValue("l", listId);
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using (var chk = new NpgsqlCommand("select 1 from list_memberships where list_id=@l and user_id=@u and revoked=false", conn))
+        { chk.Parameters.AddWithValue("l", listId); chk.Parameters.AddWithValue("u", newOwnerUserId); if (await chk.ExecuteScalarAsync(ct) == null) return false; }
+        await using var cmd = new NpgsqlCommand("update lists set owner_user_id=@u where id=@l", conn);
+        cmd.Parameters.AddWithValue("u", newOwnerUserId);
+        cmd.Parameters.AddWithValue("l", listId);
         return await cmd.ExecuteNonQueryAsync(ct) == 1;
     }
 
     public async Task<int?> GetListOwnerUserIdAsync(int listId, CancellationToken ct = default)
     {
-        await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("select owner_user_id from lists where id=@l", conn); cmd.Parameters.AddWithValue("l", listId); var res = await cmd.ExecuteScalarAsync(ct); return res is int i ? i : null;
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("select owner_user_id from lists where id=@l", conn);
+        cmd.Parameters.AddWithValue("l", listId);
+        var res = await cmd.ExecuteScalarAsync(ct);
+        return res is int i ? i : null;
     }
+
+    // Helper methods
     private static string? TryGetFromSecureStorage()
-    {
-        try { return SecureStorage.GetAsync("NEON_CONNECTION_STRING").GetAwaiter().GetResult(); } catch { return null; }
-    }
+    { try { return SecureStorage.GetAsync("NEON_CONNECTION_STRING").GetAwaiter().GetResult(); } catch { return null; } }
     private static byte[] GenerateSalt(int size)
-    {
-        var b = new byte[size]; RandomNumberGenerator.Fill(b); return b;
-    }
+    { var b = new byte[size]; RandomNumberGenerator.Fill(b); return b; }
     private static string HashPassword(string password, byte[] salt, int iterations)
-    {
-        using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256);
-        var hash = pbkdf2.GetBytes(32);
-        return $"PBKDF2$sha256${iterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}";
-    }
+    { using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256); var hash = pbkdf2.GetBytes(32); return $"PBKDF2$sha256${iterations}${Convert.ToBase64String(salt)}${Convert.ToBase64String(hash)}"; }
     private static int ExtractIterations(string stored)
-    {
-        var parts = stored.Split('$'); return parts.Length >= 5 && int.TryParse(parts[2], out var it) ? it : 100_000;
-    }
+    { var parts = stored.Split('$'); return parts.Length >= 5 && int.TryParse(parts[2], out var it) ? it : 100_000; }
     private static bool ConstantTimeEquals(string a, string b)
-    {
-        if (a.Length != b.Length) return false; int diff = 0; for (int i=0;i<a.Length;i++) diff |= a[i]^b[i]; return diff==0;
-    }
+    { if (a.Length != b.Length) return false; int diff = 0; for (int i=0;i<a.Length;i++) diff |= a[i]^b[i]; return diff==0; }
     private static string GenerateShareCode()
-    {
-        const string letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; const string digits = "0123456789"; var rnd = new Random(); var sb = new System.Text.StringBuilder(13); for (int i=0;i<3;i++) sb.Append(letters[rnd.Next(letters.Length)]); sb.Append('-'); for(int i=0;i<5;i++) sb.Append(digits[rnd.Next(digits.Length)]); sb.Append('-'); for(int i=0;i<3;i++) sb.Append(letters[rnd.Next(letters.Length)]); return sb.ToString();
-    }
+    { const string letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; const string digits = "0123456789"; var rnd = new Random(); var sb = new System.Text.StringBuilder(13); for (int i=0;i<3;i++) sb.Append(letters[rnd.Next(letters.Length)]); sb.Append('-'); for(int i=0;i<5;i++) sb.Append(digits[rnd.Next(digits.Length)]); sb.Append('-'); for(int i=0;i<3;i++) sb.Append(letters[rnd.Next(letters.Length)]); return sb.ToString(); }
 }
