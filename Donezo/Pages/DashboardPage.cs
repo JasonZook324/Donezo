@@ -159,7 +159,6 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
 
     // Responsive layout fields
     private Grid _twoPaneGrid = null!;
-    private Border _listsCard = null!;
     private Border _itemsCard = null!;
 
     // Polling state
@@ -201,6 +200,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
 
     // List panel fields referenced by item helpers
     private Switch _hideCompletedSwitch = null!; // now built inside items panel
+    private Picker _listPicker = null!; // list selection dropdown
 
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
@@ -213,6 +213,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         Shell.SetNavBarIsVisible(this, false); // hide shell nav bar globally for this page
         BuildUi();
         if (!string.IsNullOrWhiteSpace(_username)) _ = InitializeAsync();
+        // Responsive layout now simplified; keep stub
         SizeChanged += (_, _) => ApplyResponsiveLayout(Width);
         Application.Current!.RequestedThemeChanged += (_, __) =>
         {
@@ -220,152 +221,110 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         };
     }
 
-    private bool _ownershipSubscribed; // prevent duplicate MessagingCenter subscriptions
-
-    protected override void OnAppearing()
-    {
-        base.OnAppearing();
-        if (!_ownershipSubscribed)
-        {
-            MessagingCenter.Subscribe<ShareListPage, int>(this, "OwnershipTransferred", async (sender, listId) =>
-            {
-                try
-                {
-                    // Refresh lists; owned/shared classification handled inside RefreshListsAsync
-                    await RefreshListsAsync();
-                    _selectedListId = listId;
-                    UpdateAllListSelectionVisuals();
-                }
-                catch { }
-            });
-            _ownershipSubscribed = true;
-        }
-        StartPolling();
-    }
-
-    protected override void OnDisappearing()
-    {
-        base.OnDisappearing();
-        // Unsubscribe to avoid leaks
-        if (_ownershipSubscribed)
-        {
-            try { MessagingCenter.Unsubscribe<ShareListPage, int>(this, "OwnershipTransferred"); } catch { }
-            _ownershipSubscribed = false;
-        }
-        StopPolling();
-    }
-
-    // Modify StartPolling to respect throttling and suppression
-    private void StartPolling()
-    {
-        StopPolling();
-        _pollCts = new CancellationTokenSource();
-        var ct = _pollCts.Token;
-        DateTime lastRevisionCheckUtc = DateTime.MinValue;
-        _ = Task.Run(async () =>
-        {
-            while (!ct.IsCancellationRequested)
-            {
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(2), ct); // poll less frequently
-                    var listId = SelectedListId;
-                    if (listId == null) continue;
-                    // Skip if a refresh is running or just finished very recently
-                    if (_isRefreshing || _suppressListRevisionCheck || DateTime.UtcNow - _lastItemsRefreshStartUtc < ItemsRefreshMinInterval)
-                        continue;
-                    // Debounce revision checks
-                    if (DateTime.UtcNow - lastRevisionCheckUtc < TimeSpan.FromSeconds(2)) continue;
-                    lastRevisionCheckUtc = DateTime.UtcNow;
-                    var rev = await _db.GetListRevisionAsync(listId.Value);
-                    if (rev != _lastRevision)
-                    {
-                        // Update stored revision and schedule a single refresh (if not throttled)
-                        _lastRevision = rev;
-                        await MainThread.InvokeOnMainThreadAsync(async () =>
-                        {
-                            if (!_isRefreshing && DateTime.UtcNow - _lastItemsRefreshStartUtc >= ItemsRefreshMinInterval)
-                                await RefreshItemsAsync();
-                        });
-                    }
-                }
-                catch (TaskCanceledException) { }
-                catch { }
-            }
-        }, ct);
-    }
-
-    private void StopPolling()
-    {
-        try { _pollCts?.Cancel(); } catch { }
-        _pollCts = null;
-    }
-
     public void ApplyQueryAttributes(IDictionary<string, object> query)
     {
-        if (query.TryGetValue("username", out var val) && val is string name && !string.IsNullOrWhiteSpace(name))
+        if (query.TryGetValue("username", out var v) && v is string name && !string.IsNullOrWhiteSpace(name))
         {
-            _username = name;
-            if (_dualHeader != null) { _dualHeader.Username = _username; }
-            if (!_initialized) _ = InitializeAsync();
+            _username = name; if (_dualHeader != null) _dualHeader.Username = name; if (!_initialized) _ = InitializeAsync();
         }
-    }
-
-    private async Task LogoutAsync()
-    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } _username = string.Empty; if (_dualHeader != null) { _dualHeader.Username = string.Empty; } try { await Shell.Current.GoToAsync("//login"); } catch { } }
-
-    private void BuildUi()
-    {
-        _listsCard = BuildListsCard();
-        _itemsCard = BuildItemsCard();
-        _twoPaneGrid = new Grid { ColumnSpacing = 16, RowSpacing = 16 };
-        _twoPaneGrid.Add(_listsCard, 0, 0); _twoPaneGrid.Add(_itemsCard, 1, 0);
-        var contentStack = new VerticalStackLayout { Padding = new Thickness(20, 10), Spacing = 16, Children = { _twoPaneGrid } };
-
-        _dualHeader = new DualHeaderView { TitleText = "Dashboard", Username = _username };
-        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
-        _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
-        _dualHeader.DashboardRequested += (_, __) => { /* already on dashboard */ };
-        _dualHeader.ManageAccountRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//manageaccount"); } catch { } };
-        _dualHeader.ManageListsRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//dashboard"); } catch { } };
-        // Initialize theme state
-        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
-
-        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
-        root.Add(_dualHeader, 0, 0);
-        root.Add(new ScrollView { Content = contentStack }, 0, 1);
-        Content = root; ApplyResponsiveLayout(Width);
-    }
-
-    private void ApplyResponsiveLayout(double width)
-    {
-        if (_twoPaneGrid == null) return;
-        const double threshold = 900;
-        _twoPaneGrid.ColumnDefinitions.Clear(); _twoPaneGrid.RowDefinitions.Clear();
-        if (width >= threshold)
-        { _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); Grid.SetColumn(_listsCard, 0); Grid.SetRow(_listsCard, 0); Grid.SetColumn(_itemsCard, 1); Grid.SetRow(_itemsCard, 0); }
-        else
-        { _twoPaneGrid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); _twoPaneGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto)); Grid.SetColumn(_listsCard, 0); Grid.SetRow(_listsCard, 0); Grid.SetColumn(_itemsCard, 0); Grid.SetRow(_itemsCard, 1); }
     }
 
     private async Task InitializeAsync()
-    { if (_initialized) return; _initialized = true; _userId = await _db.GetUserIdAsync(_username); if (_userId == null) { await DisplayAlert("Error", "User not found.", "OK"); return; } await LoadThemePreferenceAsync(); await RefreshListsAsync(); }
+    {
+        if (_initialized) return;
+        _initialized = true;
+        _userId = await _db.GetUserIdAsync(_username);
+        if (_userId == null) return;
+        await LoadThemePreferenceAsync();
+        await RefreshListsAsync();
+    }
+
+    private async Task LogoutAsync()
+    {
+        try { SecureStorage.Remove("AUTH_USERNAME"); } catch { }
+        _username = string.Empty; if (_dualHeader != null) _dualHeader.Username = string.Empty;
+        try { await Shell.Current.GoToAsync("//login"); } catch { }
+    }
 
     private async Task LoadThemePreferenceAsync()
-    { if (_userId == null) return; var dark = await _db.GetUserThemeDarkAsync(_userId.Value); _suppressThemeEvent = true; _dualHeader.SetTheme(dark ?? false, suppressEvent:true); ApplyTheme(dark ?? false); _suppressThemeEvent = false; }
+    {
+        if (_userId == null) return;
+        var dark = await _db.GetUserThemeDarkAsync(_userId.Value);
+        _suppressThemeEvent = true;
+        _dualHeader.SetTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark), suppressEvent:true);
+        ApplyTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark));
+        _suppressThemeEvent = false;
+    }
 
     private async Task OnThemeToggledAsync(bool dark)
-    { if (_suppressThemeEvent) return; ApplyTheme(dark); if (_userId != null) await _db.SetUserThemeDarkAsync(_userId.Value, dark); }
+    {
+        if (_suppressThemeEvent) return;
+        ApplyTheme(dark);
+        if (_userId != null) { try { await _db.SetUserThemeDarkAsync(_userId.Value, dark); } catch { } }
+    }
 
     private void ApplyTheme(bool dark)
     {
-        if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
+        if (Application.Current is App app)
+            app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
         _dualHeader?.SyncFromAppTheme();
         RebuildVisibleItems();
         UpdateAllListSelectionVisuals();
     }
 
-    // Restore missing converters and item helper methods
+    private void ApplyResponsiveLayout(double width)
+    {
+        // No-op: layout simplified to vertical stack
+    }
+
+    private void BuildUi()
+    {
+        _listPicker = new Picker { Title = "Select List" };
+        _listPicker.SelectedIndexChanged += async (s,e)=>
+        {
+            if (_listPicker.SelectedItem is ListRecord lr) { _selectedListId = lr.Id; await RefreshItemsAsync(userInitiated:true); }
+            else if (_listPicker.SelectedItem is SharedListRecord sl) { _selectedListId = sl.Id; await RefreshItemsAsync(userInitiated:true); }
+        };
+        _itemsCard = BuildItemsCard();
+        var contentStack = new VerticalStackLayout { Padding = new Thickness(20,10), Spacing = 16, Children = { _listPicker, _itemsCard } };
+        _dualHeader = new DualHeaderView { TitleText = "Dashboard", Username = _username };
+        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
+        _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
+        _dualHeader.DashboardRequested += (_, __) => { /* already on dashboard */ };
+        _dualHeader.ManageAccountRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//manageaccount"); } catch { } };
+        _dualHeader.ManageListsRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//managelists?username=" + Uri.EscapeDataString(_username)); } catch { } };
+        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
+        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
+        root.Add(_dualHeader,0,0); root.Add(new ScrollView { Content = contentStack },0,1);
+        Content = root;
+    }
+
+    private async Task RefreshListsPickerAsync()
+    {
+        if (_userId == null) return;
+        var ownedRaw = await _db.GetOwnedListsAsync(_userId.Value);
+        var actuallyOwned = new List<ListRecord>();
+        foreach (var lr in ownedRaw)
+        { try { var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id); if (ownerId == _userId) actuallyOwned.Add(lr); } catch { } }
+        var shared = await _db.GetSharedListsAsync(_userId.Value);
+        // Combine into single object list for picker
+        var combined = new List<object>(); combined.AddRange(actuallyOwned); combined.AddRange(shared);
+        _listPicker.ItemsSource = combined;
+        if (_selectedListId != null)
+        {
+            var match = combined.FirstOrDefault(o => (o is ListRecord lr && lr.Id == _selectedListId) || (o is SharedListRecord sl && sl.Id == _selectedListId));
+            if (match != null) _listPicker.SelectedItem = match; else _listPicker.SelectedIndex = 0;
+        }
+        else if (combined.Count > 0)
+        { _listPicker.SelectedIndex = 0; }
+    }
+
+    private async Task RefreshListsAsync()
+    { await RefreshListsPickerAsync(); }
+
+    // ===== Added helper methods & converters restored after refactor =====
+
+    // Converters referenced in Items partial
     private class InvertBoolConverter : IValueConverter
     {
         public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => value is bool b ? !b : true;
@@ -384,10 +343,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     {
         foreach (var it in _allItems) it.IsSelected = false;
         _selectedItem = vm;
-        if (vm != null)
-        {
-            vm.IsSelected = true;
-        }
+        if (vm != null) vm.IsSelected = true;
         UpdateMoveButtons();
         UpdateChildControls();
     }
@@ -398,23 +354,12 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         UpdateMoveButtons();
         UpdateChildControls();
     }
-    private void NavigateSiblingSelection(int delta)
-    {
-        if (_selectedItem is null) return;
-        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId).OrderBy(x => x.SortKey).ToList();
-        var idx = siblings.FindIndex(x => x.Id == _selectedItem.Id);
-        if (idx < 0) return;
-        var newIdx = idx + delta;
-        if (newIdx < 0 || newIdx >= siblings.Count) return;
-        var target = siblings[newIdx];
-        SetSingleSelection(target);
-    }
 
     // Card styling
     private void ApplyItemCardStyle(Border b, ItemVm vm)
     {
         var primary = (Color)Application.Current!.Resources["Primary"];
-        var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
+        var dark = Application.Current!.RequestedTheme == AppTheme.Dark;
         var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
         b.BackgroundColor = vm.IsSelected ? primary.WithAlpha(0.18f) : baseBg;
         b.Stroke = vm.IsDragging ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
@@ -425,60 +370,10 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             if (b.BindingContext is ItemVm vm) ApplyItemCardStyle(b, vm);
     }
 
-    // Drag & drop helpers
-    private static int ComputeSubtreeDepth(ItemVm node)
-    { if (node.Children.Count == 0) return 1; int max = 0; foreach (var c in node.Children) max = Math.Max(max, ComputeSubtreeDepth(c)); return 1 + max; }
-    private static bool IsDescendant(ItemVm potentialAncestor, ItemVm node)
-    { foreach (var c in node.Children) { if (c.Id == potentialAncestor.Id) return true; if (IsDescendant(potentialAncestor, c)) return true; } return false; }
-    private static int ComputeBetweenOrder(int? prev, int? next)
-    {
-        if (prev.HasValue && next.HasValue) return prev.Value + Math.Max(1, (next.Value - prev.Value) / 2);
-        if (prev.HasValue) return prev.Value + 1;
-        if (next.HasValue) return next.Value - 1;
-        return 0;
-    }
-    private async Task HandleDropAsync(ItemVm target, string action)
-    {
-        // No-op fallback
-        await Task.CompletedTask;
-    }
-    private async Task SafeHandleDropAsync(ItemVm target, string action)
-    {
-        try { await HandleDropAsync(target, action); _dragDropCompleted = true; }
-        catch (Exception ex) { if (_dragItem is { }) _dragItem.IsDragging = false; await DisplayAlert("Reorder Error", ex.Message, "OK"); }
-        finally
-        {
-            if (_dragItem is { }) { _dragItem.IsDragging = false; _dragItem.IsPreDrag = false; }
-            foreach (var it in _allItems) it.IsPreDrag = false;
-            _pendingDragVm = null; _dragItem = null;
-        }
-    }
-    private void ScheduleHoverExpand(ItemVm vm)
-    {
-        CancelHoverExpand(vm);
-        var cts = new CancellationTokenSource();
-        _hoverExpandCts[vm.Id] = cts;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(500, cts.Token);
-                if (!cts.IsCancellationRequested)
-                    await MainThread.InvokeOnMainThreadAsync(() => { vm.IsExpanded = true; RebuildVisibleItems(); });
-            }
-            catch (TaskCanceledException) { }
-        }, cts.Token);
-    }
-    private void CancelHoverExpand(ItemVm vm) => CancelHoverExpand(vm.Id);
-    private void CancelHoverExpand(int itemId)
-    {
-        if (_hoverExpandCts.TryGetValue(itemId, out var cts)) { try { cts.Cancel(); } catch { } _hoverExpandCts.Remove(itemId); }
-    }
-
-    // Permissions (fields _ownedLists/_sharedLists live in Lists partial)
+    // Permissions / roles (uses _ownedLists / _sharedLists from Lists partial)
     private string? GetCurrentListRole()
     {
-        var listId = SelectedListId; if (listId == null) return null;
+        var listId = _selectedListId; if (listId == null) return null;
         if (_ownedLists.Any(l => l.Id == listId.Value)) return "Owner";
         var shared = _sharedLists.FirstOrDefault(s => s.Id == listId.Value);
         return shared?.Role;
@@ -495,20 +390,38 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private async Task ShowViewerBlockedAsync(string action)
     { try { await DisplayAlert("View Only", $"Your role (Viewer) does not permit {action}.", "OK"); } catch { } }
 
-    private async Task OpenShareAsync(ListRecord lr)
+    private void ScheduleHoverExpand(ItemVm vm)
     {
-        // Stub: real implementation may exist in another partial.
-        await Task.CompletedTask;
+        if (vm == null) return;
+        CancelHoverExpand(vm);
+        var cts = new CancellationTokenSource();
+        _hoverExpandCts[vm.Id] = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(500, cts.Token);
+                if (!cts.IsCancellationRequested)
+                    await MainThread.InvokeOnMainThreadAsync(() => { vm.IsExpanded = true; RebuildVisibleItems(); });
+            }
+            catch (TaskCanceledException) { }
+        }, cts.Token);
     }
-#if WINDOWS
-    private void RestorePageFocus()
-    {
-        try { if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe) fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic); } catch { }
-    }
-#else
-    private void RestorePageFocus() { }
-#endif
-}
-// end class DashboardPage
+    private void CancelHoverExpand(ItemVm vm) => CancelHoverExpand(vm.Id);
+    private void CancelHoverExpand(int itemId)
+    { if (_hoverExpandCts.TryGetValue(itemId, out var cts)) { try { cts.Cancel(); } catch { } _hoverExpandCts.Remove(itemId); } }
 
-// end namespace Donezo.Pages
+    private async Task HandleDropAsync(ItemVm target, string action)
+    { await Task.CompletedTask; }
+    private async Task SafeHandleDropAsync(ItemVm target, string action)
+    {
+        try { await HandleDropAsync(target, action); _dragDropCompleted = true; }
+        catch (Exception ex) { if (_dragItem is { }) _dragItem.IsDragging = false; await DisplayAlert("Reorder Error", ex.Message, "OK"); }
+        finally
+        {
+            if (_dragItem is { }) { _dragItem.IsDragging = false; _dragItem.IsPreDrag = false; }
+            foreach (var it in _allItems) it.IsPreDrag = false;
+            _pendingDragVm = null; _dragItem = null;
+        }
+    }
+}

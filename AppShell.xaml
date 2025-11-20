@@ -22,4 +22,10 @@
         Route="dashboard"
         ContentTemplate="{DataTemplate pages:DashboardPage}" />
 
+    <!-- Manage Lists route -->
+    <ShellContent
+        Title="Manage Lists"
+        Route="managelists"
+        ContentTemplate="{DataTemplate pages:ManageListsPage}" />
+
 </Shell>

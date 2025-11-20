@@ -78,11 +78,10 @@ public partial class DashboardPage
 
     private async Task LoadHideCompletedPreferenceForSelectedListAsync()
     {
-        // No-op if user/list context missing
-        if (_userId == null || SelectedListId == null) return;
+        if (_userId == null || _selectedListId == null) return;
         try
         {
-            var pref = await _db.GetListHideCompletedAsync(_userId.Value, SelectedListId.Value);
+            var pref = await _db.GetListHideCompletedAsync(_userId.Value, _selectedListId.Value);
             _hideCompleted = pref ?? false;
             if (_hideCompletedSwitch != null)
             {
@@ -98,9 +97,9 @@ public partial class DashboardPage
     {
         if (_suppressHideCompletedEvent) return;
         _hideCompleted = value;
-        if (_userId != null && SelectedListId != null)
+        if (_userId != null && _selectedListId != null)
         {
-            try { await _db.SetListHideCompletedAsync(_userId.Value, SelectedListId.Value, value); } catch { }
+            try { await _db.SetListHideCompletedAsync(_userId.Value, _selectedListId.Value, value); } catch { }
         }
         RebuildVisibleItems();
     }
@@ -288,7 +287,7 @@ public partial class DashboardPage
                 if (!CanDeleteItems()) { await ShowViewerBlockedAsync("deleting items"); return; }
                 if (((BindableObject)s).BindingContext is ItemVm ir)
                 {
-                    var listId = SelectedListId; if (listId == null) return;
+                    var listId = _selectedListId; if (listId == null) return;
                     var expectedRevision = await _db.GetListRevisionAsync(listId.Value);
                     var result = await _db.DeleteItemAsync(ir.Id, expectedRevision);
                     if (result.Ok) { _allItems.Remove(ir); RebuildVisibleItems(); UpdateCompletedBadge(); }
@@ -438,7 +437,7 @@ public partial class DashboardPage
         var swTotal = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var listId = SelectedListId;
+            var listId = _selectedListId;
             if (listId == null)
             {
                 Trace("RefreshItemsAsync abort: no SelectedListId");
@@ -526,18 +525,18 @@ public partial class DashboardPage
             swTotal.Stop();
             Trace($"RefreshItemsAsync end elapsed={swTotal.ElapsedMilliseconds}ms");
 #if WINDOWS
-            RestorePageFocus();
+            // RestorePageFocus removed after refactor
 #endif
             RefreshItemCardStyles();
         }
     }
 
     private async Task AddItemAsync()
-    { var listId = SelectedListId; if (listId == null) return; var name = _newItemEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.AddItemAsync(listId.Value, name); _newItemEntry.Text = string.Empty; await RefreshItemsAsync(); }
+    { var listId = _selectedListId; if (listId == null) return; var name = _newItemEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.AddItemAsync(listId.Value, name); _newItemEntry.Text = string.Empty; await RefreshItemsAsync(); }
 
     private async Task AddChildItemAsync()
     {
-        if (_selectedItem == null) return; var listId = SelectedListId; if (listId == null) return; var name = _newChildEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return;
+        if (_selectedItem == null) return; var listId = _selectedListId; if (listId == null) return; var name = _newChildEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return;
         if (_selectedItem.Level >= 3) { await DisplayAlert("Depth Limit", "Cannot add a child beyond level 3.", "OK"); return; }
         long expectedRevision = await _db.GetListRevisionAsync(listId.Value);
         try { await _db.AddChildItemAsync(listId.Value, name, _selectedItem.Id, expectedRevision); }
@@ -563,7 +562,7 @@ public partial class DashboardPage
     private async Task MoveSelectedAsync(int delta)
     {
         if (_selectedItem == null) return;
-        var listId = SelectedListId; if (listId == null) return;
+        var listId = _selectedListId; if (listId == null) return;
         var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId).OrderBy(x => x.Order).ThenBy(x => x.Id).ToList();
         var idx = siblings.FindIndex(x => x.Id == _selectedItem.Id); if (idx < 0) return;
         var targetIdx = idx + delta; if (targetIdx < 0 || targetIdx >= siblings.Count) return; // out of bounds
@@ -598,7 +597,7 @@ public partial class DashboardPage
 
     private async Task ResetSelectedSubtreeAsync()
     {
-        if (_selectedItem == null) return; var listId = SelectedListId; if (listId == null) return;
+        if (_selectedItem == null) return; var listId = _selectedListId; if (listId == null) return;
         try
         {
             var expectedRevision = await _db.GetListRevisionAsync(listId.Value);
@@ -621,7 +620,7 @@ public partial class DashboardPage
 
     private async Task ToggleItemCompletionInlineAsync(ItemVm vm, bool completed)
     {
-        if (SelectedListId == null) return;
+        if (_selectedListId == null) return;
         if (_userId == null) { await DisplayAlert("Completion", "User context missing.", "OK"); return; }
         try
         {
