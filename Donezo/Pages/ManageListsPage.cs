@@ -15,7 +15,6 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private int? _userId;
     private DualHeaderView _dualHeader = null!;
 
-    // Collections (no longer readonly so we can replace atomically to avoid modification during enumeration crashes)
     private ObservableCollection<ListRecord> _ownedListsObs = new();
     private ObservableCollection<SharedListRecord> _sharedListsObs = new();
 
@@ -27,38 +26,62 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private Button _createButton = null!;
     private Button _cancelCreateButton = null!;
     private Button _deleteButton = null!;
-    private Button _newListToggleButton = null!; // opens overlay
+    private Button _newListToggleButton = null!;
     private Entry _shareCodeEntry = null!;
     private Button _redeemButton = null!;
     private Label _sharedEmptyLabel = null!;
+    private Label _selectionStatusLabel = null!;
 
     private int? _selectedListId;
+    private bool _selectedIsShared;
+
     private IReadOnlyList<ListRecord> _ownedLists = Array.Empty<ListRecord>();
     private IReadOnlyList<SharedListRecord> _sharedLists = Array.Empty<SharedListRecord>();
 
-    // Overlay modal elements
+    private readonly Dictionary<int, Border> _ownedBorders = new();
+    private readonly Dictionary<int, Border> _sharedBorders = new();
+
     private Grid _overlayRoot = null!;
     private Border _newListModal = null!;
+
+    // Tag properties for accent & selected icon
+    static readonly BindableProperty _accentTagProperty = BindableProperty.Create("AccentRef", typeof(BoxView), typeof(ManageListsPage), null);
+    static readonly BindableProperty _selectedIconTagProperty = BindableProperty.Create("SelectedIconRef", typeof(Label), typeof(ManageListsPage), null);
 
     public ManageListsPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
     public ManageListsPage(INeonDbService db)
     {
         _db = db;
         Shell.SetNavBarIsVisible(this, false);
-        Title = string.Empty;
         BuildUi();
         _ = InitializeAsync();
     }
 
     public void ApplyQueryAttributes(IDictionary<string, object> query)
-    { if (query.TryGetValue("username", out var val) && val is string name && !string.IsNullOrWhiteSpace(name)) { _username = name; _dualHeader.Username = name; if (_userId == null) _ = InitializeAsync(); } }
+    {
+        if (query.TryGetValue("username", out var val) && val is string name && !string.IsNullOrWhiteSpace(name))
+        {
+            _username = name; _dualHeader.Username = name; if (_userId == null) _ = InitializeAsync();
+        }
+    }
 
     private async Task InitializeAsync()
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(_username)) { _username = await SecureStorage.GetAsync("AUTH_USERNAME") ?? string.Empty; if (!string.IsNullOrWhiteSpace(_username)) _dualHeader.Username = _username; }
-            if (!string.IsNullOrWhiteSpace(_username)) { _userId = await _db.GetUserIdAsync(_username); var dark = await _db.GetUserThemeDarkAsync(_userId!.Value); _dualHeader.SetTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark), suppressEvent:true); ApplyTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark)); await RefreshListsAsync(); }
+            if (string.IsNullOrWhiteSpace(_username))
+            {
+                _username = await SecureStorage.GetAsync("AUTH_USERNAME") ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(_username)) _dualHeader.Username = _username;
+            }
+            if (!string.IsNullOrWhiteSpace(_username))
+            {
+                _userId = await _db.GetUserIdAsync(_username);
+                var dark = await _db.GetUserThemeDarkAsync(_userId!.Value);
+                _dualHeader.SetTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark), suppressEvent: true);
+                ApplyTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark));
+                await RefreshListsAsync();
+            }
         }
         catch { }
     }
@@ -68,22 +91,28 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         if (_userId == null) return;
         var ownedRaw = await _db.GetOwnedListsAsync(_userId.Value);
         var actuallyOwned = new List<ListRecord>();
-        foreach (var lr in ownedRaw) { try { var owner = await _db.GetListOwnerUserIdAsync(lr.Id); if (owner == _userId) actuallyOwned.Add(lr); } catch { } }
+        foreach (var lr in ownedRaw)
+        {
+            try { var owner = await _db.GetListOwnerUserIdAsync(lr.Id); if (owner == _userId) actuallyOwned.Add(lr); } catch { }
+        }
         _ownedLists = actuallyOwned;
         _sharedLists = await _db.GetSharedListsAsync(_userId.Value);
 
-        // Replace entire observable collections on UI thread to avoid mid-enumeration mutation crash
         await MainThread.InvokeOnMainThreadAsync(() =>
         {
             _ownedListsObs = new ObservableCollection<ListRecord>(_ownedLists);
             _sharedListsObs = new ObservableCollection<SharedListRecord>(_sharedLists);
             _ownedListsView.ItemsSource = _ownedListsObs;
             _sharedListsView.ItemsSource = _sharedListsObs;
-            var allIds = _ownedLists.Select(x => x.Id).Concat(_sharedLists.Select(x => x.Id)).ToHashSet();
-            if (_selectedListId == null || !allIds.Contains(_selectedListId.Value))
-                _selectedListId = _ownedLists.FirstOrDefault()?.Id ?? _sharedLists.FirstOrDefault()?.Id;
-            UpdateSelectionVisuals();
+
+            if (_selectedListId != null)
+            {
+                bool stillOwned = !_selectedIsShared && _ownedLists.Any(o => o.Id == _selectedListId);
+                bool stillShared = _selectedIsShared && _sharedLists.Any(s => s.Id == _selectedListId);
+                if (!stillOwned && !stillShared) ClearSelection();
+            }
             _sharedEmptyLabel.IsVisible = _sharedLists.Count == 0;
+            UpdateSelectionVisuals();
         });
     }
 
@@ -94,18 +123,27 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
         _dualHeader.DashboardRequested += async (_, __) => { try { await Shell.Current.GoToAsync($"//dashboard?username={Uri.EscapeDataString(_username)}"); } catch { } };
         _dualHeader.ManageListsRequested += (_, __) => { };
-        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
+        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent: true);
 
         _shareCodeEntry = new Entry { Placeholder = "Redeem share code", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _shareCodeEntry.TextChanged += (_, __) => _redeemButton.IsEnabled = !string.IsNullOrWhiteSpace(_shareCodeEntry.Text);
         _redeemButton = new Button { Text = "Redeem", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false };
         _redeemButton.Clicked += async (_, __) => await RedeemShareCodeAsync();
         _sharedEmptyLabel = new Label { Text = "No shared lists yet.", FontSize = 12, TextColor = Colors.Gray, IsVisible = false };
+        _selectionStatusLabel = new Label { Text = "No list selected", FontSize = 12, TextColor = Colors.Gray };
 
-        _ownedListsView = new CollectionView { ItemsSource = _ownedListsObs, SelectionMode = SelectionMode.Single, ItemTemplate = new DataTemplate(() => CreateListTemplate(false)) };
-        _sharedListsView = new CollectionView { ItemsSource = _sharedListsObs, SelectionMode = SelectionMode.Single, ItemTemplate = new DataTemplate(() => CreateListTemplate(true)) };
-        _ownedListsView.SelectionChanged += (_, e) => { _selectedListId = (e.CurrentSelection.FirstOrDefault() as ListRecord)?.Id; UpdateSelectionVisuals(); };
-        _sharedListsView.SelectionChanged += (_, e) => { _selectedListId = (e.CurrentSelection.FirstOrDefault() as SharedListRecord)?.Id; UpdateSelectionVisuals(); };
+        _ownedListsView = new CollectionView
+        {
+            ItemsSource = _ownedListsObs,
+            SelectionMode = SelectionMode.None,
+            ItemTemplate = new DataTemplate(() => CreateListTemplate(false))
+        };
+        _sharedListsView = new CollectionView
+        {
+            ItemsSource = _sharedListsObs,
+            SelectionMode = SelectionMode.None,
+            ItemTemplate = new DataTemplate(() => CreateListTemplate(true))
+        };
 
         _newListToggleButton = new Button { Text = "+ New List", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _newListToggleButton.Clicked += (_, __) => ShowNewListOverlay();
@@ -131,6 +169,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                     new Label { Text = "Shared With Me", Style = (Style)Application.Current!.Resources["SectionSubTitle"] },
                     _sharedEmptyLabel,
                     _sharedListsView,
+                    _selectionStatusLabel,
                     actionsRow,
                     new Label { Text = "Redeem Code", FontAttributes = FontAttributes.Bold },
                     redeemRow
@@ -143,13 +182,154 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
         root.Add(_dualHeader, 0, 0); root.Add(scroll, 0, 1);
 
-        // Build overlay modal (hidden by default)
-        _overlayRoot = new Grid { IsVisible = false, BackgroundColor = Colors.Black.WithAlpha(0.45f), InputTransparent = false };
+        _overlayRoot = new Grid { IsVisible = false, BackgroundColor = Colors.Black.WithAlpha(0.45f) };
         var modalContent = BuildNewListModal();
         _overlayRoot.Children.Add(new Grid { VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.Center, Children = { modalContent } });
         var backdropTap = new TapGestureRecognizer(); backdropTap.Tapped += (_, __) => HideNewListOverlay(); _overlayRoot.GestureRecognizers.Add(backdropTap);
         root.Children.Add(_overlayRoot);
         Content = root;
+    }
+
+    private Border CreateListTemplate(bool isShared)
+    {
+        var accent = new BoxView { WidthRequest = 4, BackgroundColor = Colors.Transparent, VerticalOptions = LayoutOptions.Fill, HorizontalOptions = LayoutOptions.Start };
+        var name = new Label { FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center };
+        var role = new Label { FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center, IsVisible = isShared };
+        var daily = new Border
+        {
+            BackgroundColor = (Color)Application.Current!.Resources["Primary"],
+            StrokeThickness = 0,
+            Padding = new Thickness(6, 2),
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) },
+            Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White }
+        };
+        daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
+        var selectedIcon = new Label { Text = "?", FontSize = 14, TextColor = (Color)Application.Current!.Resources["Primary"], IsVisible = false, VerticalTextAlignment = TextAlignment.Center };
+
+        if (!isShared) name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
+        else { name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name)); role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role)); }
+
+        var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, selectedIcon } };
+        var border = new Border
+        {
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(12) },
+            Padding = new Thickness(10, 6),
+            Margin = new Thickness(0, 4),
+            Content = contentStack
+        };
+
+        border.SetValue(_accentTagProperty, accent);
+        border.SetValue(_selectedIconTagProperty, selectedIcon);
+        border.BindingContextChanged += (_, __) => RegisterBorder(border, isShared);
+
+        var tap = new TapGestureRecognizer();
+        tap.Tapped += (_, __) =>
+        {
+            if (border.BindingContext is ListRecord lr) SelectOwned(lr.Id, border);
+            else if (border.BindingContext is SharedListRecord sl) SelectShared(sl.Id, border);
+        };
+        border.GestureRecognizers.Add(tap);
+        return border;
+    }
+
+    private void RegisterBorder(Border border, bool isShared)
+    {
+        foreach (var kv in _ownedBorders.Where(kv => kv.Value == border).Select(kv => kv.Key).ToList()) _ownedBorders.Remove(kv);
+        foreach (var kv in _sharedBorders.Where(kv => kv.Value == border).Select(kv => kv.Key).ToList()) _sharedBorders.Remove(kv);
+        if (border.BindingContext is ListRecord lr) _ownedBorders[lr.Id] = border;
+        else if (border.BindingContext is SharedListRecord sl) _sharedBorders[sl.Id] = border;
+        ApplyVisual(border);
+    }
+
+    private void SelectOwned(int id, Border? tappedBorder = null)
+    {
+        _selectedListId = id; _selectedIsShared = false;
+        UpdateSelectionVisuals(tappedBorder);
+    }
+    private void SelectShared(int id, Border? tappedBorder = null)
+    {
+        _selectedListId = id; _selectedIsShared = true;
+        UpdateSelectionVisuals(tappedBorder);
+    }
+    private void ClearSelection() { _selectedListId = null; _selectedIsShared = false; UpdateSelectionVisuals(); }
+
+    private void UpdateSelectionVisuals(Border? tappedBorder = null)
+    {
+        // Immediate visual for tapped border (if provided) before iterating others to improve perceived responsiveness.
+        if (tappedBorder != null)
+        {
+            ApplyVisual(tappedBorder);
+        }
+        foreach (var b in _ownedBorders.Values)
+        {
+            if (b == tappedBorder) continue; // already applied
+            ApplyVisual(b);
+        }
+        foreach (var b in _sharedBorders.Values)
+        {
+            if (b == tappedBorder) continue;
+            ApplyVisual(b);
+        }
+        _deleteButton.IsEnabled = _selectedListId != null && !_selectedIsShared && _ownedLists.Any(o => o.Id == _selectedListId);
+        if (_selectedListId == null) _selectionStatusLabel.Text = "No list selected";
+        else if (!_selectedIsShared)
+        { var lr = _ownedLists.FirstOrDefault(o => o.Id == _selectedListId); _selectionStatusLabel.Text = lr != null ? $"Selected (Owned): {lr.Name}" : "No list selected"; }
+        else
+        { var sl = _sharedLists.FirstOrDefault(o => o.Id == _selectedListId); _selectionStatusLabel.Text = sl != null ? $"Selected (Shared): {sl.Name}" : "No list selected"; }
+    }
+
+    private void ApplyVisual(Border b)
+    {
+        var dark = Application.Current!.RequestedTheme == AppTheme.Dark;
+        var primary = (Color)Application.Current!.Resources["Primary"];
+        var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
+        var strokeNormal = (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
+        bool selected = false;
+        if (_selectedListId != null)
+        {
+            if (!_selectedIsShared && b.BindingContext is ListRecord lr && lr.Id == _selectedListId) selected = true;
+            if (_selectedIsShared && b.BindingContext is SharedListRecord sl && sl.Id == _selectedListId) selected = true;
+        }
+        if (selected)
+        {
+            // Softer tint (much lower alpha) and slightly darker stroke, no shadow or scale
+            var tintAlpha = dark ? 0.18f : 0.12f;
+            b.BackgroundColor = primary.WithAlpha(tintAlpha);
+            b.Stroke = primary.WithAlpha(0.85f);
+            b.StrokeThickness = 1.5;
+            b.Scale = 1.0; // remove pop effect
+            b.Shadow = null; // remove heavy shadow
+        }
+        else
+        {
+            b.BackgroundColor = baseBg;
+            b.Stroke = strokeNormal;
+            b.StrokeThickness = 1;
+            b.Scale = 1.0;
+            b.Shadow = null;
+        }
+        var accent = (BoxView)b.GetValue(_accentTagProperty);
+        if (accent != null)
+        {
+            accent.BackgroundColor = selected ? primary : Colors.Transparent;
+            accent.WidthRequest = selected ? 4 : 4; // keep consistent thinner accent
+        }
+        var icon = (Label)b.GetValue(_selectedIconTagProperty);
+        if (icon != null)
+        {
+            icon.IsVisible = selected;
+            if (selected)
+                icon.TextColor = dark ? Colors.White : primary.WithAlpha(0.9f);
+        }
+        if (b.Content is Layout layout2)
+        {
+            foreach (var lbl in layout2.Children.OfType<Label>())
+            {
+                if (lbl.FontAttributes.HasFlag(FontAttributes.Bold))
+                    lbl.TextColor = selected ? (dark ? Colors.White : primary.WithAlpha(0.9f)) : (Color)Application.Current!.Resources[dark ? "Gray100" : "Black"];
+            }
+        }
     }
 
     private Border BuildNewListModal()
@@ -159,7 +339,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _createButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         _createButton.Clicked += async (_, __) => await CreateListAsync();
         _cancelCreateButton = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _cancelCreateButton.Clicked += (_, __) => HideNewListOverlay(clear:true);
+        _cancelCreateButton.Clicked += (_, __) => HideNewListOverlay(clear: true);
         var dailyRow = new HorizontalStackLayout { Spacing = 6, Children = { new Label { Text = "Daily" }, _dailyCheck } };
         _newListModal = new Border
         {
@@ -203,40 +383,14 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         Device.StartTimer(TimeSpan.FromMilliseconds(130), () => { _overlayRoot.IsVisible = false; return false; });
     }
 
-    private Border CreateListTemplate(bool isShared)
-    {
-        var border = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(12) }, Padding = new Thickness(10,6), Margin = new Thickness(0,4) };
-        var name = new Label { FontAttributes = FontAttributes.Bold };
-        var role = new Label { FontSize = 12, TextColor = Colors.Gray, IsVisible = false };
-        var daily = new Border { BackgroundColor = (Color)Application.Current!.Resources["Primary"], StrokeThickness = 0, Padding = new Thickness(6,2), StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }, Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White } };
-        daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
-        border.BindingContextChanged += (_, __) =>
-        {
-            if (border.BindingContext is ListRecord lr) { name.Text = lr.Name; role.IsVisible = false; }
-            else if (border.BindingContext is SharedListRecord sl) { name.Text = sl.Name; role.Text = sl.Role; role.IsVisible = true; }
-            ApplyListBorderVisual(border);
-        };
-        var tap = new TapGestureRecognizer(); tap.Tapped += (_, __) => { if (isShared) _selectedListId = (border.BindingContext as SharedListRecord)?.Id; else _selectedListId = (border.BindingContext as ListRecord)?.Id; UpdateSelectionVisuals(); };
-        border.GestureRecognizers.Add(tap);
-        border.Content = new HorizontalStackLayout { Spacing = 8, Children = { name, role, daily } };
-        return border;
-    }
-
-    private void ApplyListBorderVisual(Border b)
-    {
-        var primary = (Color)Application.Current!.Resources["Primary"]; var dark = Application.Current!.RequestedTheme == AppTheme.Dark; var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"]; bool selected = false; if (b.BindingContext is ListRecord lr) selected = _selectedListId == lr.Id; if (b.BindingContext is SharedListRecord sl) selected = _selectedListId == sl.Id; b.BackgroundColor = selected ? primary.WithAlpha(0.12f) : baseBg; b.Stroke = selected ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"]; }
-
-    private void UpdateSelectionVisuals()
-    { _deleteButton.IsEnabled = _selectedListId != null && _ownedLists.Any(o => o.Id == _selectedListId); }
-
     private async Task CreateListAsync()
-    { if (_userId == null) return; var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked); HideNewListOverlay(clear:true); await RefreshListsAsync(); }
+    { if (_userId == null) return; var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked); HideNewListOverlay(clear: true); ClearSelection(); await RefreshListsAsync(); }
 
     private async Task DeleteSelectedAsync()
-    { if (_selectedListId == null) return; if (!_ownedLists.Any(o => o.Id == _selectedListId)) { await DisplayAlert("Delete", "Only owners can delete lists.", "OK"); return; } var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(_selectedListId.Value)) { await RefreshListsAsync(); } }
+    { if (_selectedListId == null) return; if (_selectedIsShared || !_ownedLists.Any(o => o.Id == _selectedListId)) { await DisplayAlert("Delete", "Only owners can delete lists.", "OK"); return; } var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(_selectedListId.Value)) { ClearSelection(); await RefreshListsAsync(); } }
 
     private async Task RedeemShareCodeAsync()
-    { var code = _shareCodeEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(code) || _userId == null) return; var (ok, listId, list, membership) = await _db.RedeemShareCodeByCodeAsync(_userId.Value, code); if (!ok || listId == null || list == null || membership == null) { await DisplayAlert("Redeem", "Invalid or unusable code.", "OK"); return; } _shareCodeEntry.Text = string.Empty; _selectedListId = listId; await RefreshListsAsync(); }
+    { var code = _shareCodeEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(code) || _userId == null) return; var (ok, listId, list, membership) = await _db.RedeemShareCodeByCodeAsync(_userId.Value, code); if (!ok || listId == null || list == null || membership == null) { await DisplayAlert("Redeem", "Invalid or unusable code.", "OK"); return; } _shareCodeEntry.Text = string.Empty; _selectedListId = list.Id; _selectedIsShared = true; UpdateSelectionVisuals(); await RefreshListsAsync(); }
 
     private async Task OnThemeToggledAsync(bool dark)
     { ApplyTheme(dark); if (_userId != null) { try { await _db.SetUserThemeDarkAsync(_userId.Value, dark); } catch { } } }
