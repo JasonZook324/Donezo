@@ -13,7 +13,7 @@ public class LoginPage : ContentPage
     private Entry _passwordEntry = null!;
     private Label _loginErrorLabel = null!;
 
-    private const double FormMaxWidth = 780; // increased width (50% larger)
+    private const double FormMaxWidth = 880; // further increased width
 
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
     public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
@@ -69,8 +69,9 @@ public class LoginPage : ContentPage
             Padding = new Thickness(24, 40, 24, 24),
             Spacing = 16,
             HorizontalOptions = LayoutOptions.Center,
-            VerticalOptions = LayoutOptions.Center, // ensure vertical centering similar across tabs
-            MaximumWidthRequest = FormMaxWidth,
+            VerticalOptions = LayoutOptions.Center,
+            WidthRequest = FormMaxWidth,
+            // MaximumWidthRequest removed to force width
             Children =
             {
                 logo,
