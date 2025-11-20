@@ -28,8 +28,6 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private Button _cancelCreateButton = null!;
     private Button _deleteButton = null!;
     private Button _newListToggleButton = null!; // [+ New List]
-    private bool _showNewListPanel; // state
-    private View _newListPanel = null!;
     private Entry _shareCodeEntry = null!;
     private Button _redeemButton = null!;
     private Label _sharedEmptyLabel = null!;
@@ -37,6 +35,10 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private int? _selectedListId;
     private IReadOnlyList<ListRecord> _ownedLists = Array.Empty<ListRecord>();
     private IReadOnlyList<SharedListRecord> _sharedLists = Array.Empty<SharedListRecord>();
+
+    // Overlay modal elements
+    private Grid _overlayRoot = null!;
+    private Border _newListModal = null!;
 
     public ManageListsPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
     public ManageListsPage(INeonDbService db)
@@ -108,21 +110,6 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _dualHeader.ManageListsRequested += (_, __) => { /* already here */ };
         _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
 
-        // New list creation controls (initially hidden)
-        _newListEntry = new Entry { Placeholder = "List name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
-        _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
-        _createButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
-        _createButton.Clicked += async (_, __) => await CreateListAsync();
-        _cancelCreateButton = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _cancelCreateButton.Clicked += (_, __) => ToggleNewListPanel(false, clear:true);
-        var dailyRow = new HorizontalStackLayout { Spacing = 6, Children = { new Label { Text = "Daily" }, _dailyCheck } };
-        _newListPanel = new VerticalStackLayout { Spacing = 8, IsVisible = false, Children = { new Label { Text = "New List", FontAttributes = FontAttributes.Bold }, _newListEntry, dailyRow, new HorizontalStackLayout { Spacing = 8, Children = { _createButton, _cancelCreateButton } } } };
-        _newListToggleButton = new Button { Text = "+ New List", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _newListToggleButton.Clicked += (_, __) => ToggleNewListPanel(!_showNewListPanel);
-
-        _deleteButton = new Button { Text = "Delete Selected", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
-        _deleteButton.Clicked += async (_, __) => await DeleteSelectedAsync();
-
         _shareCodeEntry = new Entry { Placeholder = "Redeem share code", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _shareCodeEntry.TextChanged += (_, __) => _redeemButton.IsEnabled = !string.IsNullOrWhiteSpace(_shareCodeEntry.Text);
         _redeemButton = new Button { Text = "Redeem", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false };
@@ -133,6 +120,12 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _sharedListsView = new CollectionView { ItemsSource = _sharedListsObs, SelectionMode = SelectionMode.Single, ItemTemplate = new DataTemplate(()=>CreateListTemplate(true)) };
         _ownedListsView.SelectionChanged += (_, e) => { _selectedListId = (e.CurrentSelection.FirstOrDefault() as ListRecord)?.Id; UpdateSelectionVisuals(); };
         _sharedListsView.SelectionChanged += (_, e) => { _selectedListId = (e.CurrentSelection.FirstOrDefault() as SharedListRecord)?.Id; UpdateSelectionVisuals(); };
+
+        _newListToggleButton = new Button { Text = "+ New List", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _newListToggleButton.Clicked += (_, __) => ShowNewListOverlay();
+
+        _deleteButton = new Button { Text = "Delete Selected", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
+        _deleteButton.Clicked += async (_, __) => await DeleteSelectedAsync();
 
         var redeemRow = new HorizontalStackLayout { Spacing = 8, Children = { _shareCodeEntry, _redeemButton } };
         var actionsRow = new HorizontalStackLayout { Spacing = 12, Children = { _newListToggleButton, _deleteButton } };
@@ -153,7 +146,6 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                     _sharedEmptyLabel,
                     _sharedListsView,
                     actionsRow,
-                    _newListPanel,
                     new Label { Text = "Redeem Code", FontAttributes = FontAttributes.Bold },
                     redeemRow
                 }
@@ -164,19 +156,73 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         var scroll = new ScrollView { Content = listsCard };
         var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
         root.Add(_dualHeader, 0, 0); root.Add(scroll, 0, 1);
+
+        // Build overlay modal (hidden by default)
+        _overlayRoot = new Grid { IsVisible = false, BackgroundColor = Colors.Black.WithAlpha(0.45f), InputTransparent = false };
+        var modalContent = BuildNewListModal();
+        _overlayRoot.Children.Add(new Grid { VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.Center, Children = { modalContent } });
+        // Optional tap outside to close
+        var backdropTap = new TapGestureRecognizer();
+        backdropTap.Tapped += (_, __) => HideNewListOverlay();
+        _overlayRoot.GestureRecognizers.Add(backdropTap);
+        root.Children.Add(_overlayRoot); // overlay on top
+
         Content = root;
     }
 
-    private void ToggleNewListPanel(bool show, bool clear = false)
+    private Border BuildNewListModal()
     {
-        _showNewListPanel = show;
-        _newListPanel.IsVisible = show;
-        _newListToggleButton.Text = show ? "- Hide" : "+ New List";
+        _newListEntry = new Entry { Placeholder = "List name", Style = (Style)Application.Current!.Resources["FilledEntry"], WidthRequest = 260 };
+        _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
+        _createButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
+        _createButton.Clicked += async (_, __) => await CreateListAsync();
+        _cancelCreateButton = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _cancelCreateButton.Clicked += (_, __) => HideNewListOverlay(clear:true);
+        var dailyRow = new HorizontalStackLayout { Spacing = 6, Children = { new Label { Text = "Daily" }, _dailyCheck } };
+
+        _newListModal = new Border
+        {
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(24) },
+            Padding = new Thickness(24, 28),
+            BackgroundColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "OffBlack" : "White"],
+            Content = new VerticalStackLayout
+            {
+                Spacing = 16,
+                WidthRequest = 300,
+                Children =
+                {
+                    new Label { Text = "Create New List", FontAttributes = FontAttributes.Bold, FontSize = 20, HorizontalTextAlignment = TextAlignment.Center },
+                    _newListEntry,
+                    dailyRow,
+                    new HorizontalStackLayout { Spacing = 10, HorizontalOptions = LayoutOptions.Center, Children = { _createButton, _cancelCreateButton } }
+                }
+            }
+        };
+        if (Application.Current!.Resources.TryGetValue("CardBorder", out var styleObj) && styleObj is Style style) _newListModal.Style = style;
+        return _newListModal;
+    }
+
+    private void ShowNewListOverlay()
+    {
+        _overlayRoot.IsVisible = true;
+        _newListEntry.Text = string.Empty; _dailyCheck.IsChecked = false;
+        _newListModal.Opacity = 0; _newListModal.Scale = 0.90;
+        _ = _newListModal.FadeTo(1, 160, Easing.CubicOut);
+        _ = _newListModal.ScaleTo(1, 160, Easing.CubicOut);
+        Device.BeginInvokeOnMainThread(() => _newListEntry.Focus());
+    }
+
+    private void HideNewListOverlay(bool clear = false)
+    {
         if (clear)
         {
-            _newListEntry.Text = string.Empty;
-            _dailyCheck.IsChecked = false;
+            _newListEntry.Text = string.Empty; _dailyCheck.IsChecked = false;
         }
+        if (!_overlayRoot.IsVisible) return;
+        _ = _newListModal.FadeTo(0, 120, Easing.CubicOut);
+        _ = _newListModal.ScaleTo(0.92, 120, Easing.CubicOut);
+        Device.StartTimer(TimeSpan.FromMilliseconds(130), () => { _overlayRoot.IsVisible = false; return false; });
     }
 
     private Border CreateListTemplate(bool isShared)
@@ -229,7 +275,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         if (_userId == null) return;
         var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return;
         await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked);
-        ToggleNewListPanel(false, clear:true);
+        HideNewListOverlay(clear:true);
         await RefreshListsAsync();
     }
 
