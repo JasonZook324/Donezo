@@ -58,7 +58,8 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private CollectionView _membersView = null!;
     private Picker _newCodeRolePicker = null!;
     private Entry _newCodeMaxRedeemsEntry = null!;
-    private Entry _newCodeExpireDaysEntry = null!;
+    private DatePicker _newCodeExpireDatePicker = null!;
+    private CheckBox _newCodeHasExpiry = null!;
     private Button _generateCodeButton = null!;
 
     public ManageListsPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
@@ -225,6 +226,14 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                 rolePicker.SetBinding(Picker.SelectedItemProperty, nameof(ShareCodeRecord.Role));
                 var countsLbl = new Label { FontSize = 11, TextColor = Colors.Gray };
                 countsLbl.SetBinding(Label.TextProperty, new Binding(path: nameof(ShareCodeRecord.RedeemedCount), stringFormat: "Redeemed: {0}") );
+                var copyBtn = new Button { Text = "Copy", FontSize = 11, Padding = new Thickness(6,2) };
+                copyBtn.Clicked += async (s,e) =>
+                {
+                    if (copyBtn.BindingContext is ShareCodeRecord rec && !string.IsNullOrWhiteSpace(rec.Code))
+                    {
+                        try { await Microsoft.Maui.ApplicationModel.DataTransfer.Clipboard.SetTextAsync(rec.Code); } catch { }
+                    }
+                };
                 var revokeBtn = new Button { Text = "Revoke", FontSize = 11, Padding = new Thickness(6,2), BackgroundColor = Colors.Transparent, TextColor = Colors.Red };
                 revokeBtn.Clicked += async (s,e) =>
                 {
@@ -236,11 +245,12 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                     if (rolePicker.BindingContext is ShareCodeRecord rec && rolePicker.SelectedItem is string newRole && newRole != rec.Role)
                     { try { await _db.UpdateShareCodeRoleAsync(rec.Id, newRole); await RefreshShareAsync(); } catch { } }
                 };
-                var grid = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, Padding = new Thickness(6,4) };
+                var grid = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, Padding = new Thickness(6,4) };
                 grid.Add(codeLbl,0,0);
                 grid.Add(rolePicker,1,0);
                 grid.Add(countsLbl,2,0);
-                grid.Add(revokeBtn,3,0);
+                grid.Add(copyBtn,3,0);
+                grid.Add(revokeBtn,4,0);
                 grid.BindingContextChanged += (_,__) =>
                 {
                     if (grid.BindingContext is ShareCodeRecord rec)
@@ -248,11 +258,11 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                         // Show revoked styling
                         if (rec.IsDeleted)
                         {
-                            grid.Opacity = 0.4; revokeBtn.IsEnabled = false; rolePicker.IsEnabled = false;
+                            grid.Opacity = 0.4; revokeBtn.IsEnabled = false; rolePicker.IsEnabled = false; copyBtn.IsEnabled = false;
                         }
                         else
                         {
-                            grid.Opacity = 1; revokeBtn.IsEnabled = true; rolePicker.IsEnabled = true;
+                            grid.Opacity = 1; revokeBtn.IsEnabled = true; rolePicker.IsEnabled = true; copyBtn.IsEnabled = true;
                         }
                     }
                 };
@@ -294,16 +304,20 @@ public class ManageListsPage : ContentPage, IQueryAttributable
 
         _newCodeRolePicker = new Picker { Title = "Role", ItemsSource = new[] { "Viewer", "Contributor" }, SelectedIndex = 0, WidthRequest = 140 };
         _newCodeMaxRedeemsEntry = new Entry { Placeholder = "Max redeems (0=unlimited)", Keyboard = Keyboard.Numeric, WidthRequest = 180 };
-        _newCodeExpireDaysEntry = new Entry { Placeholder = "Expires days (blank=none)", Keyboard = Keyboard.Numeric, WidthRequest = 180 };
+        _newCodeHasExpiry = new CheckBox { IsChecked = false, VerticalOptions = LayoutOptions.Center };
+        _newCodeExpireDatePicker = new DatePicker { IsEnabled = false, MinimumDate = DateTime.Today, HorizontalOptions = LayoutOptions.Start };
+        _newCodeHasExpiry.CheckedChanged += (_, e) => { _newCodeExpireDatePicker.IsEnabled = _newCodeHasExpiry.IsChecked; if (!_newCodeHasExpiry.IsChecked) _newCodeExpireDatePicker.Date = DateTime.Today; };
         _generateCodeButton = new Button { Text = "Generate Code", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         _generateCodeButton.Clicked += async (s,e) => await GenerateShareCodeAsync();
 
+        var expiryRow = new HorizontalStackLayout { Spacing = 6, Children = { new Label { Text = "Expires" }, _newCodeHasExpiry, _newCodeExpireDatePicker } };
         var newCodeRow = new VerticalStackLayout
         {
             Spacing = 8,
             Children =
             {
-                new HorizontalStackLayout { Spacing = 8, Children = { _newCodeRolePicker, _newCodeMaxRedeemsEntry, _newCodeExpireDaysEntry } },
+                new HorizontalStackLayout { Spacing = 8, Children = { _newCodeRolePicker, _newCodeMaxRedeemsEntry } },
+                expiryRow,
                 _generateCodeButton
             }
         };
@@ -339,8 +353,17 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         if (_shareListId == null) return;
         var role = _newCodeRolePicker.SelectedItem as string ?? "Viewer";
         int maxRedeems = 0; if (int.TryParse(_newCodeMaxRedeemsEntry.Text?.Trim(), out var mr) && mr >= 0) maxRedeems = mr;
-        DateTime? expiration = null; if (int.TryParse(_newCodeExpireDaysEntry.Text?.Trim(), out var days) && days > 0) expiration = DateTime.UtcNow.AddDays(days);
-        try { await _db.CreateShareCodeAsync(_shareListId.Value, role, expiration, maxRedeems); await RefreshShareAsync(); _newCodeMaxRedeemsEntry.Text = string.Empty; _newCodeExpireDaysEntry.Text = string.Empty; } catch { }
+        DateTime? expiration = null;
+        if (_newCodeHasExpiry.IsChecked)
+        {
+            try
+            {
+                var local = DateTime.SpecifyKind(_newCodeExpireDatePicker.Date.Date, DateTimeKind.Local);
+                expiration = local.ToUniversalTime();
+            }
+            catch { expiration = null; }
+        }
+        try { await _db.CreateShareCodeAsync(_shareListId.Value, role, expiration, maxRedeems); await RefreshShareAsync(); _newCodeMaxRedeemsEntry.Text = string.Empty; _newCodeHasExpiry.IsChecked = false; } catch { }
     }
 
     private async Task RefreshShareAsync()
@@ -379,44 +402,80 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         Device.StartTimer(TimeSpan.FromMilliseconds(130), () => { _shareOverlay.IsVisible = false; return false; });
     }
 
+    // Safely get color resources with fallback to avoid KeyNotFoundException
+    private static Color GetResourceColor(string key, Color fallback)
+        => Application.Current!.Resources.TryGetValue(key, out var v) && v is Color c ? c : fallback;
+
     private Border CreateListTemplate(bool isShared)
     {
         var accent = new BoxView { WidthRequest = 4, BackgroundColor = Colors.Transparent, VerticalOptions = LayoutOptions.Fill, HorizontalOptions = LayoutOptions.Start };
-        var name = new Label { FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center };
+        var name = new Label { FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center, LineBreakMode = LineBreakMode.TailTruncation };
         var role = new Label { FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center, IsVisible = isShared };
         var daily = new Border { BackgroundColor = (Color)Application.Current!.Resources["Primary"], StrokeThickness = 0, Padding = new Thickness(6,2), StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }, Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White } };
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
         var selectedIcon = new Label { Text = "?", FontSize = 14, TextColor = (Color)Application.Current!.Resources["Primary"], IsVisible = false, VerticalTextAlignment = TextAlignment.Center };
+
         var primaryColor = (Color)Application.Current!.Resources["Primary"];
-        // Share icon as image (SVG)
-        var shareImage = new Image
+        var isDark = Application.Current!.RequestedTheme == AppTheme.Dark;
+
+        // Share icon as Shapes.Path to ensure visibility
+        var shareStroke = isDark ? Colors.White : primaryColor;
+        var shareGeometry = (Microsoft.Maui.Controls.Shapes.Geometry)new Microsoft.Maui.Controls.Shapes.PathGeometryConverter().ConvertFromInvariantString("M14 3 H21 V10 M21 3 L10 14 M3 10 H11 V21 H3 Z");
+        var sharePath = new Microsoft.Maui.Controls.Shapes.Path
         {
-            Source = "share_arrow.svg",
-            WidthRequest = 18,
-            HeightRequest = 18,
-            Aspect = Aspect.AspectFit,
-            IsVisible = !isShared,
-            VerticalOptions = LayoutOptions.Center
+            Data = shareGeometry,
+            Stroke = new SolidColorBrush(shareStroke),
+            StrokeThickness = 2,
+            StrokeLineJoin = Microsoft.Maui.Controls.Shapes.PenLineJoin.Round,
+            StrokeLineCap = Microsoft.Maui.Controls.Shapes.PenLineCap.Round,
+            VerticalOptions = LayoutOptions.Center,
+            HorizontalOptions = LayoutOptions.End,
+            WidthRequest = 22,
+            HeightRequest = 22,
+            IsVisible = !isShared
         };
-        AutomationProperties.SetName(shareImage, "Manage Shares");
+        AutomationProperties.SetName(sharePath, "Manage Shares");
         var shareTap = new TapGestureRecognizer();
-        shareTap.Tapped += (s,e) =>
+        shareTap.Tapped += async (s, e) =>
         {
-            if (!isShared && (shareImage.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id);
+            if (!isShared && sharePath.BindingContext is ListRecord lr)
+            {
+                try { await Shell.Current.GoToAsync($"//shareoptions?listId={lr.Id}&username={Uri.EscapeDataString(_username)}"); } catch { }
+            }
         };
-        shareImage.GestureRecognizers.Add(shareTap);
+        sharePath.GestureRecognizers.Add(shareTap);
+
         // Bindings for name/role
         if (!isShared)
             name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
         else { name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name)); role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role)); }
-        var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareImage, selectedIcon } };
+
+        // Layout: grid with fixed accent, expanding text, then badges and icons on the right
+        var contentGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitionCollection
+            {
+                new ColumnDefinition(GridLength.Auto), // accent
+                new ColumnDefinition(GridLength.Star), // name + role
+                new ColumnDefinition(GridLength.Auto), // daily
+                new ColumnDefinition(GridLength.Auto), // share
+                new ColumnDefinition(GridLength.Auto)  // selected icon
+            },
+            ColumnSpacing = 8
+        };
+        var textRow = new HorizontalStackLayout { Spacing = 6, Children = { name, role }, VerticalOptions = LayoutOptions.Center };
+        contentGrid.Add(accent, 0, 0);
+        contentGrid.Add(textRow, 1, 0);
+        contentGrid.Add(daily, 2, 0);
+        contentGrid.Add(sharePath, 3, 0);
+        contentGrid.Add(selectedIcon, 4, 0);
         var border = new Border
         {
             StrokeThickness = 1,
             StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(12) },
             Padding = new Thickness(10, 6),
             Margin = new Thickness(0, 4),
-            Content = contentStack
+            Content = contentGrid
         };
 
         border.SetValue(_accentTagProperty, accent);
