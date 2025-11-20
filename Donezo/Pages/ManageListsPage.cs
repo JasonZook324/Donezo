@@ -416,6 +416,14 @@ public class ManageListsPage : ContentPage, IQueryAttributable
             if (!isShared && (shareIconGrid.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id);
         };
         shareIconGrid.GestureRecognizers.Add(shareTap);
+        // add bindings
+        if (!isShared)
+            name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
+        else
+        {
+            name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name));
+            role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role));
+        }
         // content stack now uses shareIconGrid instead of previous shareWrap
         var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareIconGrid, selectedIcon } };
         var border = new Border
