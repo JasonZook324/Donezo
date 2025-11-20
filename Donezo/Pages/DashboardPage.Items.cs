@@ -12,8 +12,6 @@ namespace Donezo.Pages;
 public partial class DashboardPage
 {
     private bool _pendingUiSync;
-
-    // Field to suppress revision polling during active refreshes
     private bool _suppressListRevisionCheck;
 
     // Helper moved from main partial: returns true if candidate is within descendant chain of parent
@@ -78,7 +76,6 @@ public partial class DashboardPage
         }
     }
 
-    // Stub methods to satisfy cross-partial references (implemented in main file originally)
     private async Task LoadHideCompletedPreferenceForSelectedListAsync()
     {
         // No-op if user/list context missing
@@ -87,12 +84,19 @@ public partial class DashboardPage
         {
             var pref = await _db.GetListHideCompletedAsync(_userId.Value, SelectedListId.Value);
             _hideCompleted = pref ?? false;
+            if (_hideCompletedSwitch != null)
+            {
+                _suppressHideCompletedEvent = true;
+                _hideCompletedSwitch.IsToggled = _hideCompleted;
+                _suppressHideCompletedEvent = false;
+            }
         }
         catch { }
     }
 
     private async Task OnHideCompletedToggledAsync(bool value)
     {
+        if (_suppressHideCompletedEvent) return;
         _hideCompleted = value;
         if (_userId != null && SelectedListId != null)
         {
@@ -100,8 +104,6 @@ public partial class DashboardPage
         }
         RebuildVisibleItems();
     }
-
-    // ...existing fields...
 
     // Attached properties used to track VM and handler for item card borders
     private static readonly BindableProperty TrackedVmProperty = BindableProperty.CreateAttached("TrackedVm", typeof(ItemVm), typeof(DashboardPage), null);
@@ -126,8 +128,11 @@ public partial class DashboardPage
         _moveDownButton.Clicked += async (_, __) => { if (!CanReorderItems()) { await ShowViewerBlockedAsync("reordering items"); return; } await MoveSelectedAsync(1); };
         _resetSubtreeButton = new Button { Text = "Reset Subtree", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 12, IsEnabled = false };
         _resetSubtreeButton.Clicked += async (_, __) => { if (!CanResetSubtree()) { await ShowViewerBlockedAsync("resetting subtree"); return; } await ResetSelectedSubtreeAsync(); };
+        _hideCompletedSwitch = new Switch { IsToggled = _hideCompleted };
+        _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value);
         Dispatcher.StartTimer(TimeSpan.FromMilliseconds(400), () => { UpdateMoveButtons(); return true; });
         var itemsHeader = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Items", Style = (Style)Application.Current!.Resources["SectionTitle"] }, _moveUpButton, _moveDownButton, _resetSubtreeButton } };
+        var filterRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } };
         var card = new Border
         {
             StrokeThickness = 1,
@@ -139,6 +144,7 @@ public partial class DashboardPage
                 Children =
                 {
                     itemsHeader,
+                    filterRow,
                     _emptyFilteredLabel,
                     _itemsView,
                     new HorizontalStackLayout { Spacing = 8, Children = { _newItemEntry, _addItemButton } },

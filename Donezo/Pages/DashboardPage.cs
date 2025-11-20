@@ -153,7 +153,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
 
     // Hide Completed filter state/UI
     private bool _hideCompleted;
-    private bool _suppressHideCompletedEvent;
+    private bool _suppressHideCompletedEvent; // now used to suppress toggle sync
 
     private int? _selectedListId; // selection moved to Lists partial, kept for property continuity
     private int? SelectedListId => _selectedListId;
@@ -198,11 +198,10 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private Button _resetSubtreeButton = null!;
     private Label _emptyFilteredLabel = null!;
     private Dictionary<int,bool> _expandedStates = new();
-    // Add suppression flag for viewer completion alert loop
     private bool _suppressCompletionEvent;
 
     // List panel fields referenced by item helpers
-    private Switch _hideCompletedSwitch = null!; // declared in Lists partial but duplicated here for clarity
+    private Switch _hideCompletedSwitch = null!; // now built inside items panel
 
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
@@ -340,7 +339,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
 
         // Build list & item panels via partial helpers
         _listsCard = BuildListsCard();
-        _itemsCard = BuildItemsCard();
+        _itemsCard = BuildItemsCard(); // Build items panel (now includes Hide Completed toggle)
 
         var prefsCard = new Border
         {
@@ -353,8 +352,8 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
                 Children =
                 {
                     new Label { Text = "Preferences", Style = (Style)Application.Current!.Resources["SectionTitle"] },
-                    new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } },
-                    BuildHideCompletedPreferenceRow() // partial helper builds hide completed row
+                    new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } }
+                    // Hide Completed toggle moved into items panel
                 }
             }
         };
@@ -526,7 +525,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     {
         foreach (var it in _allItems) it.IsSelected = false;
         _selectedItem = vm;
-        if (vm != null) vm.IsSelected = true;
+        if (vm != null) vm.IsSelected = true; // fixed syntax
         UpdateMoveButtons();
         UpdateChildControls();
     }
