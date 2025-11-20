@@ -20,6 +20,8 @@ public class RegisterPage : ContentPage
     private Entry _captchaEntry = null!;
     private int _captchaAnswer;
 
+    private const double FormMaxWidth = 440; // constrained width for register form
+
     public RegisterPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
 
     public RegisterPage(INeonDbService db)
@@ -71,30 +73,38 @@ public class RegisterPage : ContentPage
         _confirmEntry.Completed += OnAnyEntryCompleted;
         _captchaEntry.Completed += OnAnyEntryCompleted;
 
+        var formStack = new VerticalStackLayout
+        {
+            Padding = new Thickness(24, 40, 24, 24),
+            Spacing = 16,
+            HorizontalOptions = LayoutOptions.Center,
+            MaximumWidthRequest = FormMaxWidth,
+            Children =
+            {
+                new Label { Text = "Create Account", FontAttributes = FontAttributes.Bold, FontSize = 24, HorizontalTextAlignment = TextAlignment.Center },
+                new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
+                _usernameEntry,
+                new Label { Text = "Email", FontAttributes = FontAttributes.Bold },
+                _emailEntry,
+                new Label { Text = "First Name", FontAttributes = FontAttributes.Bold },
+                _firstNameEntry,
+                new Label { Text = "Last Name", FontAttributes = FontAttributes.Bold },
+                _lastNameEntry,
+                new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
+                _passwordEntry,
+                new Label { Text = "Confirm Password", FontAttributes = FontAttributes.Bold },
+                _confirmEntry,
+                captchaGrid,
+                registerButton
+            }
+        };
+
         Content = new ScrollView
         {
-            Content = new VerticalStackLayout
+            Content = new Grid
             {
-                Padding = new Thickness(24, 40, 24, 24),
-                Spacing = 16,
-                Children =
-                {
-                    new Label { Text = "Create Account", FontAttributes = FontAttributes.Bold, FontSize = 24 },
-                    new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
-                    _usernameEntry,
-                    new Label { Text = "Email", FontAttributes = FontAttributes.Bold },
-                    _emailEntry,
-                    new Label { Text = "First Name", FontAttributes = FontAttributes.Bold },
-                    _firstNameEntry,
-                    new Label { Text = "Last Name", FontAttributes = FontAttributes.Bold },
-                    _lastNameEntry,
-                    new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
-                    _passwordEntry,
-                    new Label { Text = "Confirm Password", FontAttributes = FontAttributes.Bold },
-                    _confirmEntry,
-                    captchaGrid,
-                    registerButton
-                }
+                HorizontalOptions = LayoutOptions.Fill,
+                Children = { formStack }
             }
         };
     }

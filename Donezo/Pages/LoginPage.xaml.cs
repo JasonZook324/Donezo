@@ -13,6 +13,8 @@ public class LoginPage : ContentPage
     private Entry _passwordEntry = null!;
     private Label _loginErrorLabel = null!;
 
+    private const double FormMaxWidth = 420; // constrained width
+
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
     public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
 
@@ -54,23 +56,33 @@ public class LoginPage : ContentPage
             Margin = new Thickness(0, 8, 0, 24)
         };
 
+        // Inner form stack (constrained width)
+        var formStack = new VerticalStackLayout
+        {
+            Padding = new Thickness(24, 40, 24, 24),
+            Spacing = 16,
+            HorizontalOptions = LayoutOptions.Center,
+            MaximumWidthRequest = FormMaxWidth,
+            Children =
+            {
+                logo,
+                tagline,
+                _loginErrorLabel,
+                new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
+                _usernameEntry,
+                new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
+                _passwordEntry,
+                loginButton
+            }
+        };
+
+        // Outer container to center content while allowing scrolling
         Content = new ScrollView
         {
-            Content = new VerticalStackLayout
+            Content = new Grid
             {
-                Padding = new Thickness(24, 40, 24, 24),
-                Spacing = 16,
-                Children =
-                {
-                    logo,
-                    tagline,
-                    _loginErrorLabel,
-                    new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
-                    _usernameEntry,
-                    new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
-                    _passwordEntry,
-                    loginButton
-                }
+                HorizontalOptions = LayoutOptions.Fill,
+                Children = { formStack }
             }
         };
     }
