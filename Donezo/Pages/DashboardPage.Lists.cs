@@ -4,6 +4,7 @@ using Donezo.Services;
 using System.Linq; // LINQ
 using Microsoft.Maui; // Colors
 using Microsoft.Maui.Storage; // Preferences
+using System.Diagnostics;
 
 namespace Donezo.Pages;
 
@@ -24,26 +25,46 @@ public partial class DashboardPage
     private readonly List<Border> _listItemBorders = new();
     private Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8, 2), IsVisible = false, FontAttributes = FontAttributes.Bold };
 
-    private Switch _hideCompletedSwitch = null!;
-    private Label _emptyFilteredLabel = null!;
-
     // Redeem share code controls
     private Entry _redeemCodeEntry = null!;
     private Button _redeemCodeButton = null!;
     private Label _sharedEmptyLabel = null!; // placeholder label when no shared lists
 
+    // Helper: ownership of specific list (independent of current selection)
+    private bool IsOwnerOfList(int listId) => _ownedLists.Any(o => o.Id == listId);
+
     private Border BuildListsCard()
     {
         _newListEntry = new Entry { Placeholder = "New list name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
-        _dailyCheck.CheckedChanged += async (s, e) => await OnDailyToggledAsync(e.Value);
+        _dailyCheck.CheckedChanged += async (s, e) =>
+        {
+            // Ignore programmatic changes
+            if (_suppressDailyEvent) return;
+            if (!IsOwnerRole())
+            {
+                // Suppress recursive event firing while reverting
+                _suppressDailyEvent = true;
+                // Revert to previous value without triggering another popup
+                _dailyCheck.IsChecked = !e.Value;
+                _suppressDailyEvent = false;
+                await ShowViewerBlockedAsync("changing daily setting");
+                return;
+            }
+            await OnDailyToggledAsync(e.Value);
+        };
         var dailyRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Daily" }, _dailyCheck } };
         _createListButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
-        _createListButton.Clicked += async (_, _) => await CreateListAsync();
+        _createListButton.Clicked += async (_, _) => {
+            if (_userId == null) return; // creation allowed always for own new list
+            var role = GetCurrentListRole();
+            // Creating new list is independent of current selection; always allowed for authenticated user.
+            await CreateListAsync();
+        };
         _deleteListButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
-        _deleteListButton.Clicked += async (_, _) => await DeleteCurrentListAsync();
+        _deleteListButton.Clicked += async (_, _) => { if (!IsOwnerRole()) { await ShowViewerBlockedAsync("deleting list"); return; } await DeleteCurrentListAsync(); };
         _resetListButton = new Button { Text = "Reset", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _resetListButton.Clicked += async (_, _) => await ResetCurrentListAsync();
+        _resetListButton.Clicked += async (_, _) => { if (!IsOwnerRole()) { await ShowViewerBlockedAsync("resetting list"); return; } await ResetCurrentListAsync(); };
 
         _redeemCodeEntry = new Entry { Placeholder = "Redeem share code", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _redeemCodeEntry.TextChanged += (_, __) => _redeemCodeButton.IsEnabled = !string.IsNullOrWhiteSpace(_redeemCodeEntry.Text);
@@ -56,15 +77,13 @@ public partial class DashboardPage
             ItemsSource = _listsObservable,
             ItemTemplate = new DataTemplate(() => CreateListItemTemplateBorder())
         };
-        _listsView.SelectionChanged += async (s, e) => HandleSelectionChanged(e.CurrentSelection.FirstOrDefault());
-
         _sharedListsView = new CollectionView
         {
             SelectionMode = SelectionMode.Single,
             ItemsSource = _sharedListsObservable,
             ItemTemplate = new DataTemplate(() => CreateListItemTemplateBorder(true))
         };
-        _sharedListsView.SelectionChanged += async (s, e) => HandleSelectionChanged(e.CurrentSelection.FirstOrDefault());
+        WireListSelectionHandlers();
 
         _sharedHeading = new Label { Text = "Shared with me", Style = (Style)Application.Current!.Resources["SectionSubTitle"], Margin = new Thickness(0, 12, 0, 0), IsVisible = true };
         _sharedEmptyLabel = new Label { Text = "No shared lists yet.", FontSize = 12, TextColor = Colors.Gray, IsVisible = false };
@@ -110,15 +129,31 @@ public partial class DashboardPage
         };
         var nameLabel = new Label { FontAttributes = FontAttributes.Bold, VerticalTextAlignment = TextAlignment.Center };
         var roleLabel = new Label { FontSize = 12, TextColor = Colors.Gray, VerticalTextAlignment = TextAlignment.Center, IsVisible = false };
+        var shareBtn = new Button { Text = "Share", FontSize = 12, Padding = new Thickness(10, 4), Style = (Style)Application.Current!.Resources["OutlinedButton"], IsVisible = !isShared };
+        shareBtn.Clicked += async (s, e) =>
+        {
+            // Determine target list from binding context (not relying on current selection)
+            if (border.BindingContext is ListRecord lr)
+            {
+                if (!IsOwnerOfList(lr.Id)) { await ShowViewerBlockedAsync("opening share options"); return; }
+                await OpenShareAsync(lr); return;
+            }
+            if (border.BindingContext is SharedListRecord sl)
+            {
+                // Shared list: only allow if user is actual owner (should not happen since shared lists exclude owner role)
+                if (!IsOwnerOfList(sl.Id)) { await ShowViewerBlockedAsync("opening share options"); return; }
+                await OpenShareAsync(new ListRecord(sl.Id, sl.Name, sl.IsDaily));
+            }
+        };
         border.BindingContextChanged += (_, __) =>
         {
             if (border.BindingContext is SharedListRecord slr)
             {
-                nameLabel.Text = slr.Name; roleLabel.Text = slr.Role; roleLabel.IsVisible = true;
+                nameLabel.Text = slr.Name; roleLabel.Text = slr.Role; roleLabel.IsVisible = true; shareBtn.IsEnabled = false; // cannot share non-owned list
             }
             else if (border.BindingContext is ListRecord lr)
             {
-                nameLabel.Text = lr.Name; roleLabel.IsVisible = false;
+                nameLabel.Text = lr.Name; roleLabel.IsVisible = false; shareBtn.IsEnabled = IsOwnerOfList(lr.Id);
             }
             if (!_listItemBorders.Contains(border)) _listItemBorders.Add(border);
             ApplyListVisual(border);
@@ -129,53 +164,160 @@ public partial class DashboardPage
             StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }, Content = new Label { Text = "Daily", FontSize = 12, TextColor = Colors.White }
         };
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
-        var shareBtn = new Button { Text = "Share", FontSize = 12, Padding = new Thickness(10, 4), Style = (Style)Application.Current!.Resources["OutlinedButton"], IsVisible = !isShared };
-        shareBtn.Clicked += async (s, e) =>
-        {
-            if (border.BindingContext is ListRecord lr) await OpenShareAsync(lr);
-            else if (border.BindingContext is SharedListRecord sl) await OpenShareAsync(new ListRecord(sl.Id, sl.Name, sl.IsDaily));
-        };
         var tapSelect = new TapGestureRecognizer();
-        tapSelect.Tapped += (s, e) => HandleSelectionChanged(border.BindingContext);
+        tapSelect.Tapped += async (s, e) =>
+        {
+            // Use the binding context and invoke unified handler
+            await HandleSelectionChangedAsync(border.BindingContext);
+        };
         border.GestureRecognizers.Add(tapSelect);
         border.Content = new HorizontalStackLayout { Spacing = 8, Children = { nameLabel, roleLabel, daily, shareBtn } };
         return border;
     }
 
-    private async void HandleSelectionChanged(object? context)
+    private void WireListSelectionHandlers()
     {
-        if (context is ListRecord lr)
-        {
-            if (_selectedListId == lr.Id) return;
-            _selectedListId = lr.Id;
-        }
-        else if (context is SharedListRecord slr)
-        {
-            if (_selectedListId == slr.Id) return;
-            _selectedListId = slr.Id;
-        }
-        else return;
-        UpdateAllListSelectionVisuals();
-        await RefreshItemsAsync();
-        SyncDailyCheckboxWithSelectedList();
+        if (_listsView != null)
+            _listsView.SelectionChanged += async (s, e) => await HandleSelectionChangedAsync(e.CurrentSelection.FirstOrDefault());
+        if (_sharedListsView != null)
+            _sharedListsView.SelectionChanged += async (s, e) => await HandleSelectionChangedAsync(e.CurrentSelection.FirstOrDefault());
+    }
+
+    private static bool _traceEnabled = true; // toggle for instrumentation
+    private void Trace(string msg)
+    {
+        if (!_traceEnabled) return;
+        try { Debug.WriteLine($"[DashTrace] {DateTime.UtcNow:HH:mm:ss.fff} {msg}"); } catch { }
     }
 
     private async Task RedeemShareCodeAsync()
     {
-        var code = _redeemCodeEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(code) || _userId == null) return;
+        var code = _redeemCodeEntry.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(code) || _userId == null) return;
+        Trace($"RedeemShareCodeAsync start code={code}");
         try
         {
             var (ok, listId, list, membership) = await _db.RedeemShareCodeByCodeAsync(_userId.Value, code);
+            Trace($"RedeemShareCodeAsync result ok={ok} listId={listId} role={membership?.Role}");
             if (!ok || listId == null || list == null || membership == null)
-            { await DisplayAlert("Redeem", "Invalid or unusable code.", "OK"); return; }
+            {
+                await DisplayAlert("Redeem", "Invalid or unusable code.", "OK");
+                return;
+            }
             _redeemCodeEntry.Text = string.Empty;
-            await RefreshListsAsync();
             _selectedListId = listId;
+            await RefreshListsAsync();
             UpdateAllListSelectionVisuals();
-            await RefreshItemsAsync();
         }
         catch (Exception ex)
-        { await DisplayAlert("Redeem", ex.Message, "OK"); }
+        {
+            Trace($"RedeemShareCodeAsync exception {ex.Message}");
+            await DisplayAlert("Redeem", ex.Message, "OK");
+        }
+        finally { Trace("RedeemShareCodeAsync end"); }
+    }
+
+    private bool _isRefreshingLists; // guard against concurrent list refreshes
+    private async Task RefreshListsAsync()
+    {
+        if (_userId == null) { Trace("RefreshListsAsync aborted: no userId"); return; }
+        if (_isRefreshingLists) { Trace("RefreshListsAsync skipped: already refreshing"); return; }
+        _isRefreshingLists = true;
+        var sw = Stopwatch.StartNew();
+        Trace("RefreshListsAsync begin");
+        try
+        {
+            var legacyOwned = await _db.GetOwnedListsAsync(_userId.Value);
+            Trace($"Owned lists fetched count={legacyOwned.Count}");
+            var actuallyOwned = new List<ListRecord>();
+            foreach (var lr in legacyOwned)
+            {
+                try
+                {
+                    var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id);
+                    if (ownerId != null && ownerId.Value == _userId.Value) actuallyOwned.Add(lr);
+                }
+                catch { }
+            }
+            _ownedLists = actuallyOwned;
+            _sharedLists = await _db.GetSharedListsAsync(_userId.Value);
+            Trace($"Shared lists fetched count={_sharedLists.Count}");
+
+            _listsObservable.Clear(); _sharedListsObservable.Clear();
+            foreach (var o in _ownedLists) _listsObservable.Add(o);
+            foreach (var s in _sharedLists) _sharedListsObservable.Add(s);
+            Trace($"Observable counts owned={_listsObservable.Count} shared={_sharedListsObservable.Count}");
+
+            var allIds = _ownedLists.Select(x => x.Id).Concat(_sharedLists.Select(x => x.Id)).ToHashSet();
+            if (_selectedListId == null || !allIds.Contains(_selectedListId.Value))
+            {
+                _selectedListId = _ownedLists.FirstOrDefault()?.Id ?? _sharedLists.FirstOrDefault()?.Id;
+                Trace($"SelectedListId adjusted to {_selectedListId}");
+            }
+
+            await RefreshItemsAsync();
+            UpdateAllListSelectionVisuals();
+            SyncDailyCheckboxWithSelectedList();
+            ApplyRoleUiRestrictions();
+        }
+        finally
+        {
+            sw.Stop();
+            Trace($"RefreshListsAsync end elapsed={sw.ElapsedMilliseconds}ms selected={_selectedListId} viewerRole={GetCurrentListRole()}");
+            _isRefreshingLists = false;
+        }
+    }
+
+    private void ApplyRoleUiRestrictions()
+    {
+        var role = GetCurrentListRole();
+        bool isViewer = string.Equals(role, "Viewer", System.StringComparison.OrdinalIgnoreCase);
+        // Disable modification controls for viewer
+        _deleteListButton.IsEnabled = !isViewer && IsOwnerRole();
+        _resetListButton.IsEnabled = !isViewer && IsOwnerRole();
+        _dailyCheck.IsEnabled = !isViewer && IsOwnerRole();
+        _createListButton.IsEnabled = _userId != null; // creation allowed always
+        // Item-level buttons handled in items template via Can* methods.
+    }
+
+    private bool _isHandlingSelection; // guard for overlapping selection processing
+    // Replace previous async void method with Task-based implementation
+    private async Task HandleSelectionChangedAsync(object? context)
+    {
+        if (_isRefreshingLists) return; // still refreshing lists
+        if (_isHandlingSelection) { Trace("HandleSelectionChangedAsync skipped: already handling"); return; }
+        _isHandlingSelection = true;
+        try
+        {
+            Trace($"HandleSelectionChangedAsync contextType={context?.GetType().Name}");
+            int? previous = _selectedListId;
+            if (context is ListRecord lr)
+            {
+                if (_selectedListId == lr.Id) { Trace("Selection unchanged (owned)"); return; }
+                _selectedListId = lr.Id;
+            }
+            else if (context is SharedListRecord slr)
+            {
+                if (_selectedListId == slr.Id) { Trace("Selection unchanged (shared)"); return; }
+                _selectedListId = slr.Id;
+            }
+            else { Trace("Selection ignored: unknown context"); return; }
+            Trace($"HandleSelectionChangedAsync newSelected={_selectedListId} prev={previous}");
+            UpdateAllListSelectionVisuals();
+            var sw = Stopwatch.StartNew();
+            await RefreshItemsAsync(userInitiated: true);
+            sw.Stop();
+            Trace($"HandleSelectionChangedAsync RefreshItemsAsync elapsed={sw.ElapsedMilliseconds}ms items={_allItems.Count}");
+            SyncDailyCheckboxWithSelectedList();
+            ApplyRoleUiRestrictions();
+        }
+        finally { _isHandlingSelection = false; }
+    }
+
+    private async void HandleSelectionChanged(object? context)
+    {
+        // Deprecated: now using HandleSelectionChangedAsync unified handler
+        await HandleSelectionChangedAsync(context);
     }
 
     private void ApplyListVisual(Border b)
@@ -191,45 +333,6 @@ public partial class DashboardPage
     }
     private void UpdateAllListSelectionVisuals() { foreach (var b in _listItemBorders) ApplyListVisual(b); }
 
-    private async Task RefreshListsAsync()
-    {
-        if (_userId == null) return;
-        // Legacy owned lists (creator) fetched first
-        var legacyOwned = await _db.GetOwnedListsAsync(_userId.Value);
-        var actuallyOwned = new List<ListRecord>();
-        foreach (var lr in legacyOwned)
-        {
-            try
-            {
-                var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id);
-                if (ownerId != null && ownerId.Value == _userId.Value)
-                {
-                    actuallyOwned.Add(lr);
-                }
-            }
-            catch { }
-        }
-        _ownedLists = actuallyOwned;
-        _sharedLists = await _db.GetSharedListsAsync(_userId.Value);
-
-        _listsObservable.Clear();
-        _sharedListsObservable.Clear();
-        foreach (var o in _ownedLists) _listsObservable.Add(o);
-        foreach (var s in _sharedLists) _sharedListsObservable.Add(s);
-
-        // Show/hide shared list collection but keep heading always visible
-        var hasShared = _sharedListsObservable.Count > 0;
-        _sharedListsView.IsVisible = hasShared;
-        _sharedEmptyLabel.IsVisible = !hasShared;
-
-        var allIds = _ownedLists.Select(x => x.Id).Concat(_sharedLists.Select(x => x.Id)).ToHashSet();
-        if (_selectedListId == null || !allIds.Contains(_selectedListId.Value))
-            _selectedListId = _ownedLists.FirstOrDefault()?.Id ?? _sharedLists.FirstOrDefault()?.Id;
-
-        await RefreshItemsAsync();
-        UpdateAllListSelectionVisuals();
-    }
-
     private void SyncDailyCheckboxWithSelectedList()
     {
         var id = SelectedListId; _suppressDailyEvent = true;
@@ -238,22 +341,22 @@ public partial class DashboardPage
     }
 
     private async Task OnDailyToggledAsync(bool isChecked)
-    { if (_suppressDailyEvent) return; var id = SelectedListId; if (id == null) return; await _db.SetListDailyAsync(id.Value, isChecked); await RefreshListsAsync(); }
+    { if (_suppressDailyEvent) return; var id = SelectedListId; if (id == null) return; if (!IsOwnerRole()) { await ShowViewerBlockedAsync("changing daily setting"); return; } await _db.SetListDailyAsync(id.Value, isChecked); await RefreshListsAsync(); }
 
     private async Task CreateListAsync()
     { if (_userId == null) return; var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked); _newListEntry.Text = string.Empty; _dailyCheck.IsChecked = false; await RefreshListsAsync(); }
 
     private async Task DeleteCurrentListAsync()
-    { var id = SelectedListId; if (id == null) return; var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(id.Value)) { await RefreshListsAsync(); _items.Clear(); _allItems.Clear(); UpdateCompletedBadge(); } }
+    { var id = SelectedListId; if (id == null) return; if (!IsOwnerRole()) { await ShowViewerBlockedAsync("deleting list"); return; } var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(id.Value)) { await RefreshListsAsync(); _items.Clear(); _allItems.Clear(); UpdateCompletedBadge(); } }
 
     private async Task ResetCurrentListAsync()
-    { var id = SelectedListId; if (id == null) return; await _db.ResetListAsync(id.Value); await RefreshItemsAsync(); UpdateCompletedBadge(); }
+    { var id = SelectedListId; if (id == null) return; if (!IsOwnerRole()) { await ShowViewerBlockedAsync("resetting list"); return; } await _db.ResetListAsync(id.Value); await RefreshItemsAsync(); UpdateCompletedBadge(); }
 
     private void UpdateCompletedBadge()
     { if (_allItems.Count == 0) { _completedBadge.IsVisible = false; return; } _completedBadge.IsVisible = _allItems.All(i => i.IsCompleted); }
 
     private View BuildHideCompletedPreferenceRow()
-    { _hideCompletedSwitch = new Switch(); _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value); return new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } }; }
+    { _hideCompletedSwitch = new Microsoft.Maui.Controls.Switch(); _hideCompletedSwitch.Toggled += async (s, e) => await OnHideCompletedToggledAsync(e.Value); return new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Hide Completed" }, _hideCompletedSwitch } }; }
 
     // Removed erroneous file-scope MessagingCenter subscription that caused build errors.
     // Ownership transfer handling is defined in DashboardPage.OnAppearing in DashboardPage.cs.

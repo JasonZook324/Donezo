@@ -183,6 +183,27 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private bool _suppressThemeEvent;
     private bool _initialized;
 
+    // Item panel fields (added back)
+    private ObservableCollection<ItemVm> _items = new(); // removed readonly to allow replacement
+    private readonly List<ItemVm> _allItems = new();
+    private readonly List<Border> _itemCardBorders = new();
+    private Entry _newItemEntry = null!;
+    private Entry _newChildEntry = null!;
+    private Button _addItemButton = null!;
+    private Button _addChildButton = null!;
+    private DataTemplate _itemViewTemplate = null!;
+    private CollectionView _itemsView = null!;
+    private Button _moveUpButton = null!;
+    private Button _moveDownButton = null!;
+    private Button _resetSubtreeButton = null!;
+    private Label _emptyFilteredLabel = null!;
+    private Dictionary<int,bool> _expandedStates = new();
+    // Add suppression flag for viewer completion alert loop
+    private bool _suppressCompletionEvent;
+
+    // List panel fields referenced by item helpers
+    private Switch _hideCompletedSwitch = null!; // declared in Lists partial but duplicated here for clarity
+
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
 
@@ -235,24 +256,38 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         StopPolling();
     }
 
+    // Modify StartPolling to respect throttling and suppression
     private void StartPolling()
     {
         StopPolling();
         _pollCts = new CancellationTokenSource();
         var ct = _pollCts.Token;
+        DateTime lastRevisionCheckUtc = DateTime.MinValue;
         _ = Task.Run(async () =>
         {
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    await Task.Delay(TimeSpan.FromSeconds(2), ct); // poll less frequently
                     var listId = SelectedListId;
                     if (listId == null) continue;
+                    // Skip if a refresh is running or just finished very recently
+                    if (_isRefreshing || _suppressListRevisionCheck || DateTime.UtcNow - _lastItemsRefreshStartUtc < ItemsRefreshMinInterval)
+                        continue;
+                    // Debounce revision checks
+                    if (DateTime.UtcNow - lastRevisionCheckUtc < TimeSpan.FromSeconds(2)) continue;
+                    lastRevisionCheckUtc = DateTime.UtcNow;
                     var rev = await _db.GetListRevisionAsync(listId.Value);
                     if (rev != _lastRevision)
                     {
-                        await MainThread.InvokeOnMainThreadAsync(async () => await RefreshItemsAsync());
+                        // Update stored revision and schedule a single refresh (if not throttled)
+                        _lastRevision = rev;
+                        await MainThread.InvokeOnMainThreadAsync(async () =>
+                        {
+                            if (!_isRefreshing && DateTime.UtcNow - _lastItemsRefreshStartUtc >= ItemsRefreshMinInterval)
+                                await RefreshItemsAsync();
+                        });
                     }
                 }
                 catch (TaskCanceledException) { }
@@ -466,132 +501,98 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private static bool IsDescendant(ItemVm potentialAncestor, ItemVm node)
     { if (node.Children.Count == 0) return false; foreach (var c in node.Children) { if (c.Id == potentialAncestor.Id) return true; if (IsDescendant(potentialAncestor, c)) return true; } return false; }
 
-    // Helper: returns true if candidate is within the descendant chain of parent (excluding parent itself)
-    private bool IsUnder(ItemVm parent, ItemVm candidate)
-    {
-        if (parent == null || candidate == null) return false;
-        if (parent.Id == candidate.Id) return false;
-        var current = candidate;
-        int guard = 0;
-        while (current.ParentId != null && guard++ < 256)
-        {
-            var p = _allItems.FirstOrDefault(x => x.Id == current.ParentId);
-            if (p == null) break;
-            if (p.Id == parent.Id) return true;
-            current = p;
-        }
-        return false;
-    }
-
-    // Recursive visible population (unfiltered)
-    private void AddWithDescendants(ItemVm node, List<ItemVm> target)
-    {
-        target.Add(node);
-        if (!node.IsExpanded) return;
-        foreach (var child in node.Children.OrderBy(c => c.SortKey)) AddWithDescendants(child, target);
-    }
-
-    // Filtered population: skip completed nodes entirely when hiding
-    private void AddWithDescendantsFiltered(ItemVm node, List<ItemVm> target)
-    {
-        if (_hideCompleted && node.IsCompleted) return;
-        target.Add(node);
-        if (!node.IsExpanded) return;
-        foreach (var child in node.Children.OrderBy(c => c.SortKey)) AddWithDescendantsFiltered(child, target);
-    }
-
+    // ComputeBetweenOrder helper (used by drag/drop ordering)
     private static int ComputeBetweenOrder(int? prev, int? next)
     {
         if (prev.HasValue && next.HasValue)
             return prev.Value + Math.Max(1, (next.Value - prev.Value) / 2);
-        if (prev.HasValue)
-            return prev.Value + 1;
-        if (next.HasValue)
-            return next.Value - 1;
+        if (prev.HasValue) return prev.Value + 1;
+        if (next.HasValue) return next.Value - 1;
         return 0;
     }
 
-    protected override void OnHandlerChanged()
-    { base.OnHandlerChanged();
 #if WINDOWS
-        try { if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe) { fe.KeyDown -= OnPageKeyDown; fe.KeyDown += OnPageKeyDown; fe.IsTabStop = true; fe.Loaded += (_, __) => fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic); } } catch { }
-#endif
-    }
-#if WINDOWS
-    private void OnPageKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    private void RestorePageFocus()
     {
-        try
-        {
-            if (_selectedItem == null) return;
-            switch (e.Key)
-            {
-                case Windows.System.VirtualKey.Up:
-                    NavigateSiblingSelection(-1); e.Handled = true; break;
-                case Windows.System.VirtualKey.Down:
-                    NavigateSiblingSelection(1); e.Handled = true; break;
-                case Windows.System.VirtualKey.Left:
-                    if (_selectedItem.HasChildren && _selectedItem.IsExpanded)
-                    { _selectedItem.IsExpanded = false; RebuildVisibleItems(); if (_selectedItem != null) SetSingleSelection(_selectedItem); e.Handled = true; }
-                    else
-                    {
-                        if (_selectedItem.ParentId != null)
-                        {
-                            var parent = _allItems.FirstOrDefault(x => x.Id == _selectedItem.ParentId.Value);
-                            if (parent != null)
-                            { SetSingleSelection(parent); e.Handled = true; }
-                        }
-                    }
-                    break;
-                case Windows.System.VirtualKey.Right:
-                    if (_selectedItem.HasChildren && !_selectedItem.IsExpanded)
-                    { _selectedItem.IsExpanded = true; RebuildVisibleItems(); if (_selectedItem != null) SetSingleSelection(_selectedItem); e.Handled = true; }
-                    else if (_selectedItem.HasChildren && _selectedItem.IsExpanded)
-                    {
-                        var firstChild = _selectedItem.Children.OrderBy(c => c.SortKey).FirstOrDefault();
-                        if (firstChild != null)
-                        { SetSingleSelection(firstChild); e.Handled = true; }
-                    }
-                    break;
-            }
-        }
-        catch { }
+        try { if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe) fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic); } catch { }
     }
 #endif
 
-    private static readonly BindableProperty TrackedVmProperty = BindableProperty.CreateAttached("TrackedVm", typeof(ItemVm), typeof(DashboardPage), null);
-    private static readonly BindableProperty TrackedHandlerProperty = BindableProperty.CreateAttached("TrackedHandler", typeof(PropertyChangedEventHandler), typeof(DashboardPage), null);
+    // Remove duplicate RebuildVisibleItems definition from this file (canonical version in DashboardPage.Items.cs)
 
+    // Ensure single SetSingleSelection implementation
     private void SetSingleSelection(ItemVm vm)
     {
-        foreach (var it in _allItems)
-            if (it.IsSelected) it.IsSelected = false;
+        foreach (var it in _allItems) it.IsSelected = false;
         _selectedItem = vm;
-        if (vm != null)
-            vm.IsSelected = true;
+        if (vm != null) vm.IsSelected = true;
         UpdateMoveButtons();
         UpdateChildControls();
+    }
+
+    // Guarded recursion helpers (single source)
+    private void AddWithDescendants(ItemVm node, List<ItemVm> target, HashSet<int>? visited = null, int depth = 0)
+    {
+        visited ??= new HashSet<int>();
+        if (node == null) return;
+        if (!visited.Add(node.Id)) return; // cycle protection
+        if (depth > 128) return; // safety guard
+        target.Add(node);
+        if (!node.IsExpanded) return;
+        foreach (var child in node.Children.OrderBy(c => c.SortKey))
+            AddWithDescendants(child, target, visited, depth + 1);
+    }
+    private void AddWithDescendantsFiltered(ItemVm node, List<ItemVm> target, HashSet<int>? visited = null, int depth = 0)
+    {
+        visited ??= new HashSet<int>();
+        if (node == null) return;
+        if (!visited.Add(node.Id)) return;
+        if (depth > 128) return;
+        if (_hideCompleted && node.IsCompleted) return;
+        target.Add(node);
+        if (!node.IsExpanded) return;
+        foreach (var child in node.Children.OrderBy(c => c.SortKey))
+            AddWithDescendantsFiltered(child, target, visited, depth + 1);
+    }
+
+    // Styling helpers for item cards
+    private void ApplyItemCardStyle(Border b, ItemVm vm)
+    {
+        var primary = (Color)Application.Current!.Resources["Primary"];
+        var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
+        var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
+        b.BackgroundColor = vm.IsSelected ? primary.WithAlpha(0.18f) : baseBg;
+        b.Stroke = vm.IsDragging ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
+    }
+    private void RefreshItemCardStyles()
+    {
+        foreach (var b in _itemCardBorders)
+        {
+            if (b.BindingContext is ItemVm vm)
+            {
+                ApplyItemCardStyle(b, vm);
+            }
+        }
     }
     private void ClearSelectionAndUi()
     {
         foreach (var it in _allItems)
-            if (it.IsSelected) it.IsSelected = false;
+            it.IsSelected = false;
         _selectedItem = null;
         UpdateMoveButtons();
         UpdateChildControls();
     }
-
     private void NavigateSiblingSelection(int delta)
     {
-        if (_selectedItem == null) return;
-        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId)
-                                 .OrderBy(x => x.SortKey)
-                                 .ToList();
+        if (_selectedItem is null) return;
+        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId).OrderBy(x => x.SortKey).ToList();
         var idx = siblings.FindIndex(x => x.Id == _selectedItem.Id);
         if (idx < 0) return;
         var newIdx = idx + delta;
         if (newIdx < 0 || newIdx >= siblings.Count) return;
         var target = siblings[newIdx];
-        var cur = target; int guard = 0; while (cur.ParentId != null && guard++ < 256)
+        var cur = target; int guard = 0;
+        while (cur.ParentId != null && guard++ < 256)
         {
             var parent = _allItems.FirstOrDefault(p => p.Id == cur.ParentId);
             if (parent == null || !parent.IsExpanded) return;
@@ -599,20 +600,6 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         }
         SetSingleSelection(target);
     }
-
-#if WINDOWS
-    private void RestorePageFocus()
-    {
-        try
-        {
-            if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe)
-            {
-                fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
-            }
-        }
-        catch { }
-    }
-#endif
 
     private class InvertBoolConverter : IValueConverter
     {
@@ -651,4 +638,24 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             await DisplayAlert("Share", $"Unable to open share dialog: {ex.Message}", "OK");
         }
     }
+
+    // Role & permission helpers (added)
+    private string? GetCurrentListRole()
+    {
+        var listId = SelectedListId; if (listId == null) return null;
+        if (_ownedLists.Any(l => l.Id == listId.Value)) return "Owner";
+        var shared = _sharedLists.FirstOrDefault(s => s.Id == listId.Value);
+        return shared?.Role; // Viewer / Contributor
+    }
+    private bool IsOwnerRole() => GetCurrentListRole() == "Owner";
+    public bool CanModifyItems() { var role = GetCurrentListRole(); return role == "Owner" || role == "Contributor"; }
+    public bool CanReorderItems() => CanModifyItems();
+    public bool CanAddItems() => CanModifyItems();
+    public bool CanDeleteItems() => CanModifyItems();
+    public bool CanRenameItems() => CanModifyItems();
+    public bool CanCompleteItems() => CanModifyItems();
+    public bool CanResetSubtree() => CanModifyItems();
+    public bool CanDragItems() => CanModifyItems();
+    private async Task ShowViewerBlockedAsync(string action)
+    { try { await DisplayAlert("View Only", $"Your role (Viewer) does not permit {action}.", "OK"); } catch { } }
 }
