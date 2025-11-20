@@ -388,48 +388,28 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
         var selectedIcon = new Label { Text = "?", FontSize = 14, TextColor = (Color)Application.Current!.Resources["Primary"], IsVisible = false, VerticalTextAlignment = TextAlignment.Center };
         var primaryColor = (Color)Application.Current!.Resources["Primary"];
-        // Share icon: square with arrow leaving (external/share)
-        var shareIconGrid = new Grid { WidthRequest = 22, HeightRequest = 22, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center };
-        // Square (box)
-        var boxBorder = new Border {
-            WidthRequest = 14,
-            HeightRequest = 14,
-            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(3) },
-            StrokeThickness = 1.5,
-            Stroke = primaryColor,
-            TranslationX = 4,
-            TranslationY = 6,
-            BackgroundColor = Colors.Transparent
+        // Share icon as image (SVG)
+        var shareImage = new Image
+        {
+            Source = "share_arrow.svg",
+            WidthRequest = 18,
+            HeightRequest = 18,
+            Aspect = Aspect.AspectFit,
+            IsVisible = !isShared,
+            VerticalOptions = LayoutOptions.Center
         };
-        // Arrow shaft (diagonal) and head using Path
-        var arrowGeometry = new Microsoft.Maui.Controls.Shapes.PathGeometry();
-        var fig = new Microsoft.Maui.Controls.Shapes.PathFigure { StartPoint = new Point(7,8) };
-        fig.Segments.Add(new Microsoft.Maui.Controls.Shapes.LineSegment { Point = new Point(14,1) });
-        var fig2 = new Microsoft.Maui.Controls.Shapes.PathFigure { StartPoint = new Point(14,1) };
-        fig2.Segments.Add(new Microsoft.Maui.Controls.Shapes.LineSegment { Point = new Point(11.2,1) });
-        var fig3 = new Microsoft.Maui.Controls.Shapes.PathFigure { StartPoint = new Point(14,1) };
-        fig3.Segments.Add(new Microsoft.Maui.Controls.Shapes.LineSegment { Point = new Point(14,3.8) });
-        arrowGeometry.Figures.Add(fig);
-        arrowGeometry.Figures.Add(fig2);
-        arrowGeometry.Figures.Add(fig3);
-        var arrowPath = new Microsoft.Maui.Controls.Shapes.Path {
-            Stroke = primaryColor,
-            StrokeThickness = 1.8,
-            Data = arrowGeometry,
-            TranslationX = 0,
-            TranslationY = 0
-        };
-        shareIconGrid.Children.Add(boxBorder);
-        shareIconGrid.Children.Add(arrowPath);
-        AutomationProperties.SetName(shareIconGrid, "Manage Shares");
+        AutomationProperties.SetName(shareImage, "Manage Shares");
         var shareTap = new TapGestureRecognizer();
-        shareTap.Tapped += (s,e) => { if (!isShared && (shareIconGrid.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id); };
-        shareIconGrid.GestureRecognizers.Add(shareTap);
-        // Bindings for name/role remain
+        shareTap.Tapped += (s,e) =>
+        {
+            if (!isShared && (shareImage.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id);
+        };
+        shareImage.GestureRecognizers.Add(shareTap);
+        // Bindings for name/role
         if (!isShared)
             name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
         else { name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name)); role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role)); }
-        var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareIconGrid, selectedIcon } };
+        var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareImage, selectedIcon } };
         var border = new Border
         {
             StrokeThickness = 1,
