@@ -2,6 +2,7 @@ using Microsoft.Maui.Controls;
 using Microsoft.Maui.Controls.Shapes;
 using Donezo.Services;
 using Microsoft.Maui.Storage;
+using System.Text.RegularExpressions;
 
 namespace Donezo.Pages;
 
@@ -12,6 +13,12 @@ public class LoginPage : ContentPage
     private Entry _usernameEntry = null!;
     private Entry _passwordEntry = null!;
     private Label _loginErrorLabel = null!;
+    private Button _loginButton = null!;
+    private Button _togglePasswordBtn = null!;
+    private ActivityIndicator _loadingIndicator = null!;
+    private Border _card = null!;
+
+    private const double FormMaxWidth = 830; // midpoint width
 
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
     public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
@@ -23,56 +30,196 @@ public class LoginPage : ContentPage
         BuildUi();
     }
 
+    protected override async void OnAppearing()
+    {
+        base.OnAppearing();
+        // simple fade-in animation for card
+        _card.Opacity = 0;
+        await _card.FadeTo(1, 300, Easing.CubicOut);
+    }
+
     private void BuildUi()
     {
-        _usernameEntry = new Entry { Placeholder = "username", Style = (Style)Application.Current!.Resources["FilledEntry"] };
-        _passwordEntry = new Entry { Placeholder = "password", IsPassword = true, Style = (Style)Application.Current!.Resources["FilledEntry"] };
-        _usernameEntry.TextChanged += (_, _) => HideError();
-        _passwordEntry.TextChanged += (_, _) => HideError();
+        var primary = (Color)Application.Current!.Resources["Primary"];
+
+        _usernameEntry = new Entry { Placeholder = "username", Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "LoginUsername" };
+        _passwordEntry = new Entry { Placeholder = "password", IsPassword = true, Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "LoginPassword" };
+        _usernameEntry.TextChanged += (_, _) => { HideError(); ValidateFields(); };
+        _passwordEntry.TextChanged += (_, _) => { HideError(); ValidateFields(); };
         // ENTER submits form from any field
         _usernameEntry.Completed += OnAnyEntryCompleted;
         _passwordEntry.Completed += OnAnyEntryCompleted;
 
-        var loginButton = new Button { Text = "Login", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
-        loginButton.Clicked += OnLoginClicked;
+        _togglePasswordBtn = new Button
+        {
+            Text = "Show",
+            FontSize = 12,
+            Padding = new Thickness(10, 4),
+            Style = (Style)Application.Current.Resources["OutlinedButton"],
+            AutomationId = "TogglePasswordVisibility"
+        };
+        _togglePasswordBtn.Clicked += (_, _) => TogglePasswordVisibility();
+
+        _loginButton = new Button { Text = "Login", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false, AutomationId = "LoginSubmit" };
+        _loginButton.Clicked += OnLoginClicked;
 
         _loginErrorLabel = new Label
         {
             TextColor = Colors.Red,
             FontAttributes = FontAttributes.Bold,
-            IsVisible = false
+            IsVisible = false,
+            AutomationId = "LoginError"
         };
+
+        _loadingIndicator = new ActivityIndicator { IsVisible = false, IsRunning = false, Color = primary, AutomationId = "LoginLoading" };
+
+        var tabsRow = BuildInlineTabs();
+        var header = new Label
+        {
+            Text = "Welcome Back",
+            FontAttributes = FontAttributes.Bold,
+            FontSize = 26,
+            HorizontalTextAlignment = TextAlignment.Center,
+            TextColor = primary
+        };
+        var tagline = new Label
+        {
+            Text = "Sign in to access your lists",
+            FontSize = 14,
+            HorizontalTextAlignment = TextAlignment.Center,
+            TextColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "Gray400" : "Gray600"],
+            Margin = new Thickness(0, 2, 0, 18)
+        };
+
+        var passwordRow = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
+        passwordRow.Add(_passwordEntry, 0, 0);
+        passwordRow.Add(_togglePasswordBtn, 1, 0);
+
+        // Inner form stack (constrained width)
+        var formStack = new VerticalStackLayout
+        {
+            Spacing = 14,
+            HorizontalOptions = LayoutOptions.Fill,
+            Children =
+            {
+                tabsRow,
+                header,
+                tagline,
+                _loginErrorLabel,
+                new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
+                _usernameEntry,
+                new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
+                passwordRow,
+                _loginButton,
+                _loadingIndicator
+            }
+        };
+
+        // Outer card container
+        _card = new Border
+        {
+            StrokeThickness = 1,
+            Stroke = primary,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(28) },
+            Padding = new Thickness(32, 36),
+            BackgroundColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "OffBlack" : "White"],
+            WidthRequest = FormMaxWidth,
+            Content = formStack,
+            Shadow = new Shadow { Brush = Brush.Black, Offset = new Point(0, 4), Radius = 18f, Opacity = 0.25f }
+        };
+        // allow style override if provided
+        if (Application.Current.Resources.TryGetValue("CardBorder", out var styleObj) && styleObj is Style style) _card.Style = style;
 
         var logo = BuildLogoView();
 
-        var tagline = new Label
+        var outerStack = new VerticalStackLayout
         {
-            Text = "From to-do... to Donezo.",
-            FontSize = 16,
-            HorizontalTextAlignment = TextAlignment.Center,
-            TextColor = (Color)Application.Current!.Resources["Primary"],
-            Margin = new Thickness(0, 8, 0, 24)
+            Spacing = 24,
+            HorizontalOptions = LayoutOptions.Center,
+            VerticalOptions = LayoutOptions.Center,
+            Children = { logo, _card }
         };
 
-        Content = new ScrollView
+        var scroll = new ScrollView { Content = outerStack };
+
+        // gradient background
+        var gradient = new LinearGradientBrush
         {
-            Content = new VerticalStackLayout
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(0, 1),
+            GradientStops = new GradientStopCollection
             {
-                Padding = new Thickness(24, 40, 24, 24),
-                Spacing = 16,
-                Children =
-                {
-                    logo,
-                    tagline,
-                    _loginErrorLabel,
-                    new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
-                    _usernameEntry,
-                    new Label { Text = "Password", FontAttributes = FontAttributes.Bold },
-                    _passwordEntry,
-                    loginButton
-                }
+                new GradientStop(primary.WithAlpha(0.30f), 0.0f),
+                new GradientStop(primary.WithAlpha(0.05f), 1.0f)
             }
         };
+
+        Content = new Grid
+        {
+            Background = gradient,
+            Children = { scroll }
+        };
+    }
+
+    private void TogglePasswordVisibility()
+    {
+        _passwordEntry.IsPassword = !_passwordEntry.IsPassword;
+        _togglePasswordBtn.Text = _passwordEntry.IsPassword ? "Show" : "Hide";
+    }
+
+    private void ValidateFields()
+    {
+        bool valid = !string.IsNullOrWhiteSpace(_usernameEntry.Text) && !string.IsNullOrWhiteSpace(_passwordEntry.Text) && _passwordEntry.Text!.Length >= 3;
+        _loginButton.IsEnabled = valid && !_loadingIndicator.IsRunning;
+    }
+
+    private View BuildInlineTabs()
+    {
+        var loginBtn = new Button
+        {
+            Text = "Login",
+            Style = (Style)Application.Current!.Resources["OutlinedButton"],
+            FontSize = 14,
+            Padding = new Thickness(14,6),
+            CornerRadius = 20,
+            AutomationId = "TabLogin"
+        };
+        var registerBtn = new Button
+        {
+            Text = "Register",
+            Style = (Style)Application.Current!.Resources["OutlinedButton"],
+            FontSize = 14,
+            Padding = new Thickness(14,6),
+            CornerRadius = 20,
+            AutomationId = "TabRegister"
+        };
+
+        // Visual selection state: emphasize active route
+        void SyncActive()
+        {
+            var route = Shell.Current?.CurrentState?.Location?.ToString() ?? string.Empty;
+            bool onLogin = route.Contains("login", StringComparison.OrdinalIgnoreCase);
+            bool onRegister = route.Contains("register", StringComparison.OrdinalIgnoreCase);
+            var primary = (Color)Application.Current!.Resources["Primary"];
+            loginBtn.BorderColor = primary;
+            registerBtn.BorderColor = primary;
+            loginBtn.BackgroundColor = onLogin ? primary.WithAlpha(0.18f) : Colors.Transparent;
+            registerBtn.BackgroundColor = onRegister ? primary.WithAlpha(0.18f) : Colors.Transparent;
+        }
+
+        loginBtn.Clicked += async (_, _) => { await Shell.Current.GoToAsync("//login"); SyncActive(); };
+        registerBtn.Clicked += async (_, _) => { await Shell.Current.GoToAsync("//register"); SyncActive(); };
+
+        // Initial state
+        SyncActive();
+
+        var row = new HorizontalStackLayout
+        {
+            Spacing = 12,
+            HorizontalOptions = LayoutOptions.Center,
+            Children = { loginBtn, registerBtn }
+        };
+        return row;
     }
 
     private void OnAnyEntryCompleted(object? sender, EventArgs e)
@@ -107,7 +254,7 @@ public class LoginPage : ContentPage
         var grid = new Grid
         {
             HorizontalOptions = LayoutOptions.Center,
-            Margin = new Thickness(0,0,0,8),
+            Margin = new Thickness(0,0,0,4),
             WidthRequest = size,
             HeightRequest = size
         };
@@ -124,25 +271,26 @@ public class LoginPage : ContentPage
 
     private async void OnLoginClicked(object sender, EventArgs e)
     {
-        _loginErrorLabel.IsVisible = false; // reset
-
+        if (_loadingIndicator.IsRunning) return;
+        HideError();
         var username = _usernameEntry.Text ?? string.Empty;
         var password = _passwordEntry.Text ?? string.Empty;
-
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password)) { ShowError("Username and password required."); return; }
+        _loadingIndicator.IsVisible = true; _loadingIndicator.IsRunning = true; _loginButton.IsEnabled = false; _loginButton.Text = "Signing in...";
+        try
         {
-            ShowError("Username and password required.");
-            return;
+            var ok = await _db.AuthenticateUserAsync(username, password);
+            if (!ok) { ShowError("Invalid username or password."); return; }
+            await NavigateToDashboardAsync(username);
         }
-
-        var ok = await _db.AuthenticateUserAsync(username, password);
-        if (!ok)
+        catch (Exception ex)
         {
-            ShowError("Invalid username or password.");
-            return;
+            ShowError(ex.Message);
         }
-
-        await NavigateToDashboardAsync(username);
+        finally
+        {
+            _loadingIndicator.IsRunning = false; _loadingIndicator.IsVisible = false; _loginButton.Text = "Login"; ValidateFields();
+        }
     }
 
     private void ShowError(string message)
