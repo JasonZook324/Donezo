@@ -30,11 +30,5 @@
                 try { await GoToAsync("//login"); } catch { }
             }
         }
-
-        private async void OnResetAuthClicked(object sender, EventArgs e)
-        {
-            try { Microsoft.Maui.Storage.SecureStorage.Remove("AUTH_USERNAME"); } catch { }
-            try { await GoToAsync("//login"); } catch { }
-        }
     }
 }

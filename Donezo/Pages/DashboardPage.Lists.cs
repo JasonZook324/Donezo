@@ -21,7 +21,6 @@ public partial class DashboardPage
     private CheckBox _dailyCheck = null!;
     private Button _createListButton = null!;
     private Button _deleteListButton = null!;
-    private Button _resetListButton = null!;
     private readonly List<Border> _listItemBorders = new();
     private Label _completedBadge = new() { Text = "Completed", BackgroundColor = Colors.Green, TextColor = Colors.White, Padding = new Thickness(8, 2), IsVisible = false, FontAttributes = FontAttributes.Bold };
 
@@ -63,8 +62,6 @@ public partial class DashboardPage
         };
         _deleteListButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
         _deleteListButton.Clicked += async (_, _) => { if (!IsOwnerRole()) { await ShowViewerBlockedAsync("deleting list"); return; } await DeleteCurrentListAsync(); };
-        _resetListButton = new Button { Text = "Reset", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
-        _resetListButton.Clicked += async (_, _) => { if (!IsOwnerRole()) { await ShowViewerBlockedAsync("resetting list"); return; } await ResetCurrentListAsync(); };
 
         _redeemCodeEntry = new Entry { Placeholder = "Redeem share code", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _redeemCodeEntry.TextChanged += (_, __) => _redeemCodeButton.IsEnabled = !string.IsNullOrWhiteSpace(_redeemCodeEntry.Text);
@@ -110,7 +107,7 @@ public partial class DashboardPage
                     new Label { Text = "Redeem Code", FontAttributes = FontAttributes.Bold },
                     new HorizontalStackLayout { Spacing = 8, Children = { _redeemCodeEntry, _redeemCodeButton } },
                     dailyRow,
-                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton, _resetListButton } }
+                    new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _createListButton, _deleteListButton } }
                 }
             }
         };
@@ -274,7 +271,6 @@ public partial class DashboardPage
         bool isViewer = string.Equals(role, "Viewer", System.StringComparison.OrdinalIgnoreCase);
         // Disable modification controls for viewer
         _deleteListButton.IsEnabled = !isViewer && IsOwnerRole();
-        _resetListButton.IsEnabled = !isViewer && IsOwnerRole();
         _dailyCheck.IsEnabled = !isViewer && IsOwnerRole();
         _createListButton.IsEnabled = _userId != null; // creation allowed always
         // Item-level buttons handled in items template via Can* methods.
@@ -348,9 +344,6 @@ public partial class DashboardPage
 
     private async Task DeleteCurrentListAsync()
     { var id = SelectedListId; if (id == null) return; if (!IsOwnerRole()) { await ShowViewerBlockedAsync("deleting list"); return; } var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(id.Value)) { await RefreshListsAsync(); _items.Clear(); _allItems.Clear(); UpdateCompletedBadge(); } }
-
-    private async Task ResetCurrentListAsync()
-    { var id = SelectedListId; if (id == null) return; if (!IsOwnerRole()) { await ShowViewerBlockedAsync("resetting list"); return; } await _db.ResetListAsync(id.Value); await RefreshItemsAsync(); UpdateCompletedBadge(); }
 
     private void UpdateCompletedBadge()
     { if (_allItems.Count == 0) { _completedBadge.IsVisible = false; return; } _completedBadge.IsVisible = _allItems.All(i => i.IsCompleted); }
