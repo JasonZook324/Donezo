@@ -388,10 +388,14 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
         var selectedIcon = new Label { Text = "?", FontSize = 14, TextColor = (Color)Application.Current!.Resources["Primary"], IsVisible = false, VerticalTextAlignment = TextAlignment.Center };
         var primaryColor = (Color)Application.Current!.Resources["Primary"];
-        var shareWrap = new HorizontalStackLayout { Spacing = 4, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center };
-        var shareGlyph = new Label { Text = "?", FontSize = 13, TextColor = primaryColor, VerticalTextAlignment = TextAlignment.Center };
+        // Build a reliable share control: vector chain + text
+        var chainIcon = new Grid { WidthRequest = 18, HeightRequest = 14, VerticalOptions = LayoutOptions.Center };
+        var chainLeft = new Border { WidthRequest = 8, HeightRequest = 8, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(4) }, StrokeThickness = 1.2, Stroke = primaryColor, TranslationX = 0, TranslationY = 3 };
+        var chainRight = new Border { WidthRequest = 8, HeightRequest = 8, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(4) }, StrokeThickness = 1.2, Stroke = primaryColor, TranslationX = 10, TranslationY = 3 };
+        var chainConnector = new BoxView { WidthRequest = 6, HeightRequest = 2, Color = primaryColor, TranslationX = 6, TranslationY = 6 };
+        chainIcon.Children.Add(chainLeft); chainIcon.Children.Add(chainRight); chainIcon.Children.Add(chainConnector);
         var shareText = new Label { Text = "Share", FontSize = 12, TextColor = primaryColor, VerticalTextAlignment = TextAlignment.Center };
-        shareWrap.Children.Add(shareGlyph); shareWrap.Children.Add(shareText);
+        var shareWrap = new HorizontalStackLayout { Spacing = 4, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center, Children = { chainIcon, shareText } };
         AutomationProperties.SetName(shareWrap, "Manage Shares");
         var shareTap = new TapGestureRecognizer();
         shareTap.Tapped += (s,e) =>
