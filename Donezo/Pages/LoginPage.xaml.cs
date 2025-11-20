@@ -53,8 +53,11 @@ public class LoginPage : ContentPage
             FontSize = 16,
             HorizontalTextAlignment = TextAlignment.Center,
             TextColor = (Color)Application.Current!.Resources["Primary"],
-            Margin = new Thickness(0, 8, 0, 24)
+            Margin = new Thickness(0, 8, 0, 12)
         };
+
+        // Inline tab buttons (Login / Register)
+        var tabsRow = BuildInlineTabs();
 
         // Inner form stack (constrained width)
         var formStack = new VerticalStackLayout
@@ -67,6 +70,7 @@ public class LoginPage : ContentPage
             {
                 logo,
                 tagline,
+                tabsRow,
                 _loginErrorLabel,
                 new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
                 _usernameEntry,
@@ -85,6 +89,53 @@ public class LoginPage : ContentPage
                 Children = { formStack }
             }
         };
+    }
+
+    private View BuildInlineTabs()
+    {
+        var loginBtn = new Button
+        {
+            Text = "Login",
+            Style = (Style)Application.Current!.Resources["OutlinedButton"],
+            FontSize = 14,
+            Padding = new Thickness(14,6),
+            CornerRadius = 20
+        };
+        var registerBtn = new Button
+        {
+            Text = "Register",
+            Style = (Style)Application.Current!.Resources["OutlinedButton"],
+            FontSize = 14,
+            Padding = new Thickness(14,6),
+            CornerRadius = 20
+        };
+
+        // Visual selection state: emphasize active route
+        void SyncActive()
+        {
+            var route = Shell.Current?.CurrentState?.Location?.ToString() ?? string.Empty;
+            bool onLogin = route.Contains("login", StringComparison.OrdinalIgnoreCase);
+            bool onRegister = route.Contains("register", StringComparison.OrdinalIgnoreCase);
+            var primary = (Color)Application.Current!.Resources["Primary"];
+            loginBtn.BorderColor = primary;
+            registerBtn.BorderColor = primary;
+            loginBtn.BackgroundColor = onLogin ? primary.WithAlpha(0.15f) : Colors.Transparent;
+            registerBtn.BackgroundColor = onRegister ? primary.WithAlpha(0.15f) : Colors.Transparent;
+        }
+
+        loginBtn.Clicked += async (_, _) => { await Shell.Current.GoToAsync("//login"); SyncActive(); };
+        registerBtn.Clicked += async (_, _) => { await Shell.Current.GoToAsync("//register"); SyncActive(); };
+
+        // Initial state
+        SyncActive();
+
+        var row = new HorizontalStackLayout
+        {
+            Spacing = 12,
+            HorizontalOptions = LayoutOptions.Center,
+            Children = { loginBtn, registerBtn }
+        };
+        return row;
     }
 
     private void OnAnyEntryCompleted(object? sender, EventArgs e)
