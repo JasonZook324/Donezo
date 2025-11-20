@@ -144,6 +144,8 @@ public class DualHeaderView : ContentView
         menuContainer.Children.Add(_menuBorder);
         overlay.Children.Add(menuContainer);
         Content = overlay;
+        // Ensure initial username state hides icon when not logged in
+        UpdateUsername();
     }
 
     private View BuildMenuItem(string text, Action action, bool isDestructive = false)
@@ -188,6 +190,8 @@ public class DualHeaderView : ContentView
 
     private void ToggleMenu()
     {
+        // Guard: only allow menu if a user is logged in
+        if (string.IsNullOrWhiteSpace(Username)) return;
         if (_menuVisible) { HideMenu(); return; }
         ShowMenu();
     }
@@ -207,12 +211,17 @@ public class DualHeaderView : ContentView
 
     private void UpdatePageTitle() => _pageTitleLabel.Text = TitleText;
     private void UpdateTagline() => _taglineLabel.Text = Tagline;
-    private void UpdateUsername() => _usernameMenuLabel.Text = string.IsNullOrWhiteSpace(Username) ? "Not signed in" : Username;
+    private void UpdateUsername()
+    {
+        var hasUser = !string.IsNullOrWhiteSpace(Username);
+        _usernameMenuLabel.Text = hasUser ? Username : string.Empty;
+        _userIconGrid.IsVisible = hasUser; // hide icon when not logged in
+        if (!hasUser && _menuVisible) HideMenu();
+    }
 
     private void OnRequestedThemeChanged(object? sender, AppThemeChangedEventArgs e)
     {
         _toggle.SetState(e.RequestedTheme == AppTheme.Dark, suppressEvent:true, animate:true);
-        // Update menu background for contrast
         if (Application.Current != null)
         {
             var primary = (Color)Application.Current.Resources["Primary"]; _menuBorder.BackgroundColor = primary.WithAlpha(0.90f);
