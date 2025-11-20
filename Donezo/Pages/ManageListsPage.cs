@@ -25,7 +25,11 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private Entry _newListEntry = null!;
     private CheckBox _dailyCheck = null!;
     private Button _createButton = null!;
+    private Button _cancelCreateButton = null!;
     private Button _deleteButton = null!;
+    private Button _newListToggleButton = null!; // [+ New List]
+    private bool _showNewListPanel; // state
+    private View _newListPanel = null!;
     private Entry _shareCodeEntry = null!;
     private Button _redeemButton = null!;
     private Label _sharedEmptyLabel = null!;
@@ -101,16 +105,24 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
         _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
         _dualHeader.DashboardRequested += async (_, __) => { try { await Shell.Current.GoToAsync($"//dashboard?username={Uri.EscapeDataString(_username)}"); } catch { } };
-        _dualHeader.ManageAccountRequested += async (_, __) => { /* future */ };
         _dualHeader.ManageListsRequested += (_, __) => { /* already here */ };
         _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
 
-        _newListEntry = new Entry { Placeholder = "New list name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
+        // New list creation controls (initially hidden)
+        _newListEntry = new Entry { Placeholder = "List name", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _dailyCheck = new CheckBox { VerticalOptions = LayoutOptions.Center };
         _createButton = new Button { Text = "Create", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         _createButton.Clicked += async (_, __) => await CreateListAsync();
-        _deleteButton = new Button { Text = "Delete", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
+        _cancelCreateButton = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _cancelCreateButton.Clicked += (_, __) => ToggleNewListPanel(false, clear:true);
+        var dailyRow = new HorizontalStackLayout { Spacing = 6, Children = { new Label { Text = "Daily" }, _dailyCheck } };
+        _newListPanel = new VerticalStackLayout { Spacing = 8, IsVisible = false, Children = { new Label { Text = "New List", FontAttributes = FontAttributes.Bold }, _newListEntry, dailyRow, new HorizontalStackLayout { Spacing = 8, Children = { _createButton, _cancelCreateButton } } } };
+        _newListToggleButton = new Button { Text = "+ New List", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _newListToggleButton.Clicked += (_, __) => ToggleNewListPanel(!_showNewListPanel);
+
+        _deleteButton = new Button { Text = "Delete Selected", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
         _deleteButton.Clicked += async (_, __) => await DeleteSelectedAsync();
+
         _shareCodeEntry = new Entry { Placeholder = "Redeem share code", Style = (Style)Application.Current!.Resources["FilledEntry"] };
         _shareCodeEntry.TextChanged += (_, __) => _redeemButton.IsEnabled = !string.IsNullOrWhiteSpace(_shareCodeEntry.Text);
         _redeemButton = new Button { Text = "Redeem", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false };
@@ -122,8 +134,8 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _ownedListsView.SelectionChanged += (_, e) => { _selectedListId = (e.CurrentSelection.FirstOrDefault() as ListRecord)?.Id; UpdateSelectionVisuals(); };
         _sharedListsView.SelectionChanged += (_, e) => { _selectedListId = (e.CurrentSelection.FirstOrDefault() as SharedListRecord)?.Id; UpdateSelectionVisuals(); };
 
-        var createRow = new HorizontalStackLayout { Spacing = 8, Children = { _newListEntry, _dailyCheck, _createButton, _deleteButton } };
         var redeemRow = new HorizontalStackLayout { Spacing = 8, Children = { _shareCodeEntry, _redeemButton } };
+        var actionsRow = new HorizontalStackLayout { Spacing = 12, Children = { _newListToggleButton, _deleteButton } };
 
         var listsCard = new Border
         {
@@ -140,9 +152,10 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                     new Label { Text = "Shared With Me", Style = (Style)Application.Current!.Resources["SectionSubTitle"] },
                     _sharedEmptyLabel,
                     _sharedListsView,
+                    actionsRow,
+                    _newListPanel,
                     new Label { Text = "Redeem Code", FontAttributes = FontAttributes.Bold },
-                    redeemRow,
-                    createRow
+                    redeemRow
                 }
             }
         };
@@ -152,6 +165,18 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
         root.Add(_dualHeader, 0, 0); root.Add(scroll, 0, 1);
         Content = root;
+    }
+
+    private void ToggleNewListPanel(bool show, bool clear = false)
+    {
+        _showNewListPanel = show;
+        _newListPanel.IsVisible = show;
+        _newListToggleButton.Text = show ? "- Hide" : "+ New List";
+        if (clear)
+        {
+            _newListEntry.Text = string.Empty;
+            _dailyCheck.IsChecked = false;
+        }
     }
 
     private Border CreateListTemplate(bool isShared)
@@ -204,7 +229,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         if (_userId == null) return;
         var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return;
         await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked);
-        _newListEntry.Text = string.Empty; _dailyCheck.IsChecked = false;
+        ToggleNewListPanel(false, clear:true);
         await RefreshListsAsync();
     }
 
