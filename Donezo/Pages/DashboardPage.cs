@@ -217,7 +217,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         SizeChanged += (_, _) => ApplyResponsiveLayout(Width);
         Application.Current!.RequestedThemeChanged += (_, __) =>
         {
-            MainThread.BeginInvokeOnMainThread(RebuildVisibleItems);
+            MainThread.BeginInvokeOnMainThread(() => { RebuildVisibleItems(); UpdateAllListSelectionVisuals(); });
         };
     }
 
@@ -393,7 +393,8 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     {
         _themeLabel.Text = dark ? "Dark" : "Light";
         if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
-        RebuildVisibleItems(); // ensure theme-aware bindings update
+        RebuildVisibleItems(); // ensure item visuals update
+        UpdateAllListSelectionVisuals(); // ensure list card visuals (owned & shared) update backgrounds/strokes
     }
 
     private void ScheduleHoverExpand(ItemVm vm)
