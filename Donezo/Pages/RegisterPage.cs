@@ -1,6 +1,7 @@
 using Microsoft.Maui.Controls;
 using Donezo.Services;
 using Microsoft.Maui.Storage;
+using Microsoft.Maui.Controls.Shapes;
 
 namespace Donezo.Pages;
 
@@ -15,7 +16,7 @@ public class RegisterPage : ContentPage
     private Entry _firstNameEntry = null!;
     private Entry _lastNameEntry = null!;
 
-    private const double FormMaxWidth = 440; // constrained width for register form
+    private const double FormMaxWidth = 520; // standardized width (same as login)
 
     public RegisterPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
 
@@ -38,7 +39,6 @@ public class RegisterPage : ContentPage
         var registerButton = new Button { Text = "Register", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
         registerButton.Clicked += OnRegisterClicked;
 
-        // ENTER submits form from any field
         _usernameEntry.Completed += OnAnyEntryCompleted;
         _emailEntry.Completed += OnAnyEntryCompleted;
         _firstNameEntry.Completed += OnAnyEntryCompleted;
@@ -46,18 +46,22 @@ public class RegisterPage : ContentPage
         _passwordEntry.Completed += OnAnyEntryCompleted;
         _confirmEntry.Completed += OnAnyEntryCompleted;
 
+        var logo = BuildLogoView();
         var tabsRow = BuildInlineTabs();
+        var header = new Label { Text = "Create Account", FontAttributes = FontAttributes.Bold, FontSize = 24, HorizontalTextAlignment = TextAlignment.Center };
 
         var formStack = new VerticalStackLayout
         {
             Padding = new Thickness(24, 40, 24, 24),
             Spacing = 16,
             HorizontalOptions = LayoutOptions.Center,
+            VerticalOptions = LayoutOptions.Center,
             MaximumWidthRequest = FormMaxWidth,
             Children =
             {
-                new Label { Text = "Create Account", FontAttributes = FontAttributes.Bold, FontSize = 24, HorizontalTextAlignment = TextAlignment.Center },
+                logo,
                 tabsRow,
+                header,
                 new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
                 _usernameEntry,
                 new Label { Text = "Email", FontAttributes = FontAttributes.Bold },
@@ -127,9 +131,38 @@ public class RegisterPage : ContentPage
         };
     }
 
-    private void OnAnyEntryCompleted(object? sender, EventArgs e)
+    private void OnAnyEntryCompleted(object? sender, EventArgs e) => OnRegisterClicked(sender!, e);
+
+    private View BuildLogoView()
     {
-        OnRegisterClicked(sender!, e);
+        var primary = (Color)Application.Current!.Resources["Primary"];        
+        var size = 128d;
+        var circle = new Ellipse
+        {
+            WidthRequest = size,
+            HeightRequest = size,
+            Stroke = new SolidColorBrush(primary),
+            StrokeThickness = 8,
+            Fill = Colors.Transparent
+        };
+        var check = new Polyline
+        {
+            Stroke = new SolidColorBrush(primary),
+            StrokeThickness = 8,
+            StrokeLineJoin = PenLineJoin.Round,
+            StrokeLineCap = PenLineCap.Round,
+            Points = new PointCollection { new(38, 64), new(60, 86), new(94, 52) }
+        };
+        var grid = new Grid
+        {
+            HorizontalOptions = LayoutOptions.Center,
+            Margin = new Thickness(0,0,0,8),
+            WidthRequest = size,
+            HeightRequest = size
+        };
+        grid.Add(circle);
+        grid.Add(check);
+        return grid;
     }
 
     private async void OnRegisterClicked(object sender, EventArgs e)
@@ -155,7 +188,7 @@ public class RegisterPage : ContentPage
         var ok = await _db.RegisterUserAsync(username, password, email, first, last);
         if (ok)
         {
-            await NavigateToDashboardAsync(username); // no popup on success
+            await NavigateToDashboardAsync(username);
         }
         else
         {
@@ -166,7 +199,6 @@ public class RegisterPage : ContentPage
     private async Task NavigateToDashboardAsync(string username)
     {
         await SecureStorage.SetAsync("AUTH_USERNAME", username);
-        // Navigate to dashboard route with username as query parameter and reset nav stack (hides TabBar)
         await Shell.Current.GoToAsync($"//dashboard?username={Uri.EscapeDataString(username)}");
     }
 }

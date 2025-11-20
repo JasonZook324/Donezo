@@ -13,7 +13,7 @@ public class LoginPage : ContentPage
     private Entry _passwordEntry = null!;
     private Label _loginErrorLabel = null!;
 
-    private const double FormMaxWidth = 420; // constrained width
+    private const double FormMaxWidth = 520; // standardized width
 
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
     public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
@@ -46,18 +46,22 @@ public class LoginPage : ContentPage
         };
 
         var logo = BuildLogoView();
-
+        var tabsRow = BuildInlineTabs(); // now directly under logo for consistency
+        var header = new Label
+        {
+            Text = "Login",
+            FontAttributes = FontAttributes.Bold,
+            FontSize = 24,
+            HorizontalTextAlignment = TextAlignment.Center
+        };
         var tagline = new Label
         {
             Text = "From to-do... to Donezo.",
             FontSize = 16,
             HorizontalTextAlignment = TextAlignment.Center,
             TextColor = (Color)Application.Current!.Resources["Primary"],
-            Margin = new Thickness(0, 8, 0, 12)
+            Margin = new Thickness(0, 4, 0, 20)
         };
-
-        // Inline tab buttons (Login / Register)
-        var tabsRow = BuildInlineTabs();
 
         // Inner form stack (constrained width)
         var formStack = new VerticalStackLayout
@@ -65,12 +69,14 @@ public class LoginPage : ContentPage
             Padding = new Thickness(24, 40, 24, 24),
             Spacing = 16,
             HorizontalOptions = LayoutOptions.Center,
+            VerticalOptions = LayoutOptions.Center, // ensure vertical centering similar across tabs
             MaximumWidthRequest = FormMaxWidth,
             Children =
             {
                 logo,
-                tagline,
                 tabsRow,
+                header,
+                tagline,
                 _loginErrorLabel,
                 new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
                 _usernameEntry,
