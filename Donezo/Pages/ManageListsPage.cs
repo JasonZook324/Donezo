@@ -388,43 +388,47 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
         var selectedIcon = new Label { Text = "?", FontSize = 14, TextColor = (Color)Application.Current!.Resources["Primary"], IsVisible = false, VerticalTextAlignment = TextAlignment.Center };
         var primaryColor = (Color)Application.Current!.Resources["Primary"];
-        // Share icon: three nodes connected (triangle) - sized 20x20
-        var shareIconGrid = new Grid { WidthRequest = 20, HeightRequest = 20, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center };
-        // Nodes
-        var nodeSize = 6.0;
-        var topNode = new Ellipse { WidthRequest = nodeSize, HeightRequest = nodeSize, Fill = primaryColor, TranslationX = 7, TranslationY = 0 };
-        var leftNode = new Ellipse { WidthRequest = nodeSize, HeightRequest = nodeSize, Fill = primaryColor, TranslationX = 0, TranslationY = 12 };
-        var rightNode = new Ellipse { WidthRequest = nodeSize, HeightRequest = nodeSize, Fill = primaryColor, TranslationX = 14, TranslationY = 12 };
-        // Connectors (lines) using thin BoxViews
-        var lineThickness = 2.0;
-        // Left to top
-        var lineLeftTop = new BoxView { WidthRequest = 2, HeightRequest = 12, Color = primaryColor, TranslationX = 4, TranslationY = 2, Rotation = -55 };
-        // Top to right
-        var lineTopRight = new BoxView { WidthRequest = 2, HeightRequest = 12, Color = primaryColor, TranslationX = 12, TranslationY = 2, Rotation = 55 };
-        // Left to right (base)
-        var lineBase = new BoxView { WidthRequest = 12, HeightRequest = lineThickness, Color = primaryColor, TranslationX = 4, TranslationY = 14 };
-        shareIconGrid.Children.Add(lineLeftTop);
-        shareIconGrid.Children.Add(lineTopRight);
-        shareIconGrid.Children.Add(lineBase);
-        shareIconGrid.Children.Add(topNode);
-        shareIconGrid.Children.Add(leftNode);
-        shareIconGrid.Children.Add(rightNode);
+        // Share icon: square with arrow leaving (external/share)
+        var shareIconGrid = new Grid { WidthRequest = 22, HeightRequest = 22, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center };
+        // Square (box)
+        var boxBorder = new Border {
+            WidthRequest = 14,
+            HeightRequest = 14,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(3) },
+            StrokeThickness = 1.5,
+            Stroke = primaryColor,
+            TranslationX = 4,
+            TranslationY = 6,
+            BackgroundColor = Colors.Transparent
+        };
+        // Arrow shaft (diagonal) and head using Path
+        var arrowGeometry = new Microsoft.Maui.Controls.Shapes.PathGeometry();
+        var fig = new Microsoft.Maui.Controls.Shapes.PathFigure { StartPoint = new Point(7,8) };
+        fig.Segments.Add(new Microsoft.Maui.Controls.Shapes.LineSegment { Point = new Point(14,1) });
+        var fig2 = new Microsoft.Maui.Controls.Shapes.PathFigure { StartPoint = new Point(14,1) };
+        fig2.Segments.Add(new Microsoft.Maui.Controls.Shapes.LineSegment { Point = new Point(11.2,1) });
+        var fig3 = new Microsoft.Maui.Controls.Shapes.PathFigure { StartPoint = new Point(14,1) };
+        fig3.Segments.Add(new Microsoft.Maui.Controls.Shapes.LineSegment { Point = new Point(14,3.8) });
+        arrowGeometry.Figures.Add(fig);
+        arrowGeometry.Figures.Add(fig2);
+        arrowGeometry.Figures.Add(fig3);
+        var arrowPath = new Microsoft.Maui.Controls.Shapes.Path {
+            Stroke = primaryColor,
+            StrokeThickness = 1.8,
+            Data = arrowGeometry,
+            TranslationX = 0,
+            TranslationY = 0
+        };
+        shareIconGrid.Children.Add(boxBorder);
+        shareIconGrid.Children.Add(arrowPath);
         AutomationProperties.SetName(shareIconGrid, "Manage Shares");
         var shareTap = new TapGestureRecognizer();
-        shareTap.Tapped += (s,e) =>
-        {
-            if (!isShared && (shareIconGrid.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id);
-        };
+        shareTap.Tapped += (s,e) => { if (!isShared && (shareIconGrid.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id); };
         shareIconGrid.GestureRecognizers.Add(shareTap);
-        // add bindings
+        // Bindings for name/role remain
         if (!isShared)
             name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
-        else
-        {
-            name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name));
-            role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role));
-        }
-        // content stack now uses shareIconGrid instead of previous shareWrap
+        else { name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name)); role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role)); }
         var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareIconGrid, selectedIcon } };
         var border = new Border
         {
