@@ -306,13 +306,13 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         if (query.TryGetValue("username", out var val) && val is string name && !string.IsNullOrWhiteSpace(name))
         {
             _username = name;
-            if (_dualHeader != null) { _dualHeader.ShowLogout = true; }
+            if (_dualHeader != null) { _dualHeader.Username = _username; }
             if (!_initialized) _ = InitializeAsync();
         }
     }
 
     private async Task LogoutAsync()
-    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } _username = string.Empty; if (_dualHeader != null) { _dualHeader.ShowLogout = false; } try { await Shell.Current.GoToAsync("//login"); } catch { } }
+    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } _username = string.Empty; if (_dualHeader != null) { _dualHeader.Username = string.Empty; } try { await Shell.Current.GoToAsync("//login"); } catch { } }
 
     private void BuildUi()
     {
@@ -322,9 +322,12 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _twoPaneGrid.Add(_listsCard, 0, 0); _twoPaneGrid.Add(_itemsCard, 1, 0);
         var contentStack = new VerticalStackLayout { Padding = new Thickness(20, 10), Spacing = 16, Children = { _twoPaneGrid } };
 
-        _dualHeader = new DualHeaderView { TitleText = "Dashboard", ShowLogout = !string.IsNullOrWhiteSpace(_username) };
+        _dualHeader = new DualHeaderView { TitleText = "Dashboard", Username = _username };
         _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
         _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
+        _dualHeader.DashboardRequested += (_, __) => { /* already on dashboard */ };
+        _dualHeader.ManageAccountRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//manageaccount"); } catch { } };
+        _dualHeader.ManageListsRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//dashboard"); } catch { } };
         // Initialize theme state
         _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
 

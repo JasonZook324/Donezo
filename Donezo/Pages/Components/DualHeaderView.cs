@@ -15,42 +15,71 @@ public class DualHeaderView : ContentView
         nameof(Tagline), typeof(string), typeof(DualHeaderView), "Organize your tasks", propertyChanged: (b, o, n) => ((DualHeaderView)b).UpdateTagline());
     public string Tagline { get => (string)GetValue(TaglineProperty); set => SetValue(TaglineProperty, value); }
 
-    public static readonly BindableProperty ShowLogoutProperty = BindableProperty.Create(
-        nameof(ShowLogout), typeof(bool), typeof(DualHeaderView), false, propertyChanged: (b, o, n) => ((DualHeaderView)b).UpdateLogoutVisibility());
-    public bool ShowLogout { get => (bool)GetValue(ShowLogoutProperty); set => SetValue(ShowLogoutProperty, value); }
+    // Username shown top of menu
+    public static readonly BindableProperty UsernameProperty = BindableProperty.Create(
+        nameof(Username), typeof(string), typeof(DualHeaderView), string.Empty, propertyChanged: (b, o, n) => ((DualHeaderView)b).UpdateUsername());
+    public string Username { get => (string)GetValue(UsernameProperty); set => SetValue(UsernameProperty, value); }
 
     // Events
     public event EventHandler<bool>? ThemeToggled;
     public event EventHandler? LogoutRequested;
+    public event EventHandler? DashboardRequested;
+    public event EventHandler? ManageAccountRequested;
+    public event EventHandler? ManageListsRequested;
 
     private readonly Label _appTitleLabel;
     private readonly Label _taglineLabel;
     private readonly Label _pageTitleLabel;
-    private readonly Button _logoutButton;
     private readonly ThemeToggleView _toggle;
     private readonly Grid _root;
+    private readonly Grid _userIconGrid;
+    private readonly Border _menuBorder;
+    private readonly VerticalStackLayout _menuStack;
+    private readonly TapGestureRecognizer _iconTap;
+    private bool _menuVisible;
+    private readonly Label _usernameMenuLabel;
 
     public DualHeaderView()
     {
         var primary = (Color)Application.Current!.Resources["Primary"];
-        BackgroundColor = primary; // single bar uses brand color background
+        BackgroundColor = primary;
         Padding = new Thickness(20, 18, 20, 18);
-        Application.Current!.RequestedThemeChanged += OnRequestedThemeChanged; // subscribe
+        Application.Current!.RequestedThemeChanged += OnRequestedThemeChanged;
+
         _toggle = new ThemeToggleView();
         _toggle.Toggled += (_, dark) => ThemeToggled?.Invoke(this, dark);
 
-        _logoutButton = new Button
+        // User icon (head + shoulders)
+        _userIconGrid = BuildUserIcon();
+        _iconTap = new TapGestureRecognizer();
+        _iconTap.Tapped += (_, _) => ToggleMenu();
+        _userIconGrid.GestureRecognizers.Add(_iconTap);
+        SemanticProperties.SetDescription(_userIconGrid, "Open user menu");
+
+        // Menu content
+        _usernameMenuLabel = new Label { FontAttributes = FontAttributes.Bold, TextColor = Colors.White, FontSize = 14 };
+        _menuStack = new VerticalStackLayout { Spacing = 6 };
+        _menuStack.Children.Add(_usernameMenuLabel);
+        _menuStack.Children.Add(new BoxView { HeightRequest = 1, HorizontalOptions = LayoutOptions.Fill, BackgroundColor = Colors.White.WithAlpha(0.25f) });
+        _menuStack.Children.Add(BuildMenuItem("Dashboard", () => DashboardRequested?.Invoke(this, EventArgs.Empty)));
+        _menuStack.Children.Add(BuildMenuItem("Manage Account", () => ManageAccountRequested?.Invoke(this, EventArgs.Empty)));
+        _menuStack.Children.Add(BuildMenuItem("Manage Lists", () => ManageListsRequested?.Invoke(this, EventArgs.Empty)));
+        _menuStack.Children.Add(new BoxView { HeightRequest = 1, HorizontalOptions = LayoutOptions.Fill, BackgroundColor = Colors.White.WithAlpha(0.25f) });
+        _menuStack.Children.Add(BuildMenuItem("Logout", () => LogoutRequested?.Invoke(this, EventArgs.Empty), isDestructive:true));
+
+        _menuBorder = new Border
         {
-            Text = "Logout",
-            BackgroundColor = Colors.Transparent,
-            TextColor = Colors.White,
-            BorderColor = Colors.White,
-            BorderWidth = 1,
-            CornerRadius = 8,
-            Padding = new Thickness(12,6)
+            StrokeThickness = 1,
+            Stroke = Colors.White.WithAlpha(0.35f),
+            BackgroundColor = primary.WithAlpha(0.90f),
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) },
+            Padding = new Thickness(14, 12),
+            Content = _menuStack,
+            TranslationY = 4,
+            Opacity = 0,
+            IsVisible = false,
+            Shadow = new Shadow { Brush = Brush.Black, Offset = new Point(0,4), Radius = 12, Opacity = 0.35f }
         };
-        _logoutButton.Clicked += (_, _) => LogoutRequested?.Invoke(this, EventArgs.Empty);
-        _logoutButton.IsVisible = false;
 
         // Logo (circle + check)
         var logoSize = 42d;
@@ -82,44 +111,112 @@ public class DualHeaderView : ContentView
             VerticalTextAlignment = TextAlignment.Center,
             HorizontalOptions = LayoutOptions.Center,
             VerticalOptions = LayoutOptions.Center,
-            InputTransparent = true // allow clicks to pass to underlying controls
+            InputTransparent = true
         };
         UpdatePageTitle();
         SemanticProperties.SetHeadingLevel(_pageTitleLabel, SemanticHeadingLevel.Level1);
 
-        // Right controls
         var rightStack = new HorizontalStackLayout
         {
-            Spacing = 14,
+            Spacing = 16,
             VerticalOptions = LayoutOptions.Center,
-            Children = { _toggle, _logoutButton }
+            Children = { _toggle, _userIconGrid }
         };
 
         _root = new Grid
         {
             ColumnDefinitions = new ColumnDefinitionCollection
             {
-                new ColumnDefinition(GridLength.Auto), // left logo/app
-                new ColumnDefinition(GridLength.Star), // middle filler
-                new ColumnDefinition(GridLength.Auto)  // right controls
+                new ColumnDefinition(GridLength.Auto),
+                new ColumnDefinition(GridLength.Star),
+                new ColumnDefinition(GridLength.Auto)
             }
         };
         _root.Add(leftStack, 0, 0);
         _root.Add(rightStack, 2, 0);
-        // Overlay page title spanning all columns for true center relative to full width
-        Grid.SetColumn(_pageTitleLabel, 0);
-        Grid.SetColumnSpan(_pageTitleLabel, 3);
-        _root.Add(_pageTitleLabel);
-        Content = _root;
+        Grid.SetColumn(_pageTitleLabel, 0); Grid.SetColumnSpan(_pageTitleLabel, 3); _root.Add(_pageTitleLabel);
+
+        // Absolute overlay for menu
+        var overlay = new Grid();
+        overlay.Children.Add(_root);
+        // Position menu near icon (end alignment)
+        var menuContainer = new Grid { HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Start, Margin = new Thickness(0, 60, 6, 0) };
+        menuContainer.Children.Add(_menuBorder);
+        overlay.Children.Add(menuContainer);
+        Content = overlay;
+    }
+
+    private View BuildMenuItem(string text, Action action, bool isDestructive = false)
+    {
+        var lbl = new Label { Text = text, TextColor = isDestructive ? Colors.OrangeRed : Colors.White, FontSize = 14 };
+        var tap = new TapGestureRecognizer();
+        tap.Tapped += async (_, _) => { HideMenu(); action(); };
+        lbl.GestureRecognizers.Add(tap);
+        return lbl;
+    }
+
+    private Grid BuildUserIcon()
+    {
+        var size = 40d;
+        var head = new Ellipse { WidthRequest = 16, HeightRequest = 16, Fill = Colors.White, TranslationY = -4 };
+        var body = new Microsoft.Maui.Controls.Shapes.Path
+        {
+            Stroke = Colors.White,
+            StrokeThickness = 2,
+            Data = new PathGeometry
+            {
+                Figures = new PathFigureCollection
+                {
+                    new PathFigure
+                    {
+                        StartPoint = new Point(8,20),
+                        Segments = new PathSegmentCollection
+                        {
+                            new QuadraticBezierSegment { Point1 = new Point(4,32), Point2 = new Point(20,32) }
+                        }
+                    }
+                }
+            }
+        };
+        var circleBg = new Ellipse { WidthRequest = size, HeightRequest = size, Fill = Colors.Transparent, Stroke = Colors.White, StrokeThickness = 2 };
+        var g = new Grid { WidthRequest = size, HeightRequest = size, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+        g.Children.Add(circleBg);
+        g.Children.Add(head);
+        g.Children.Add(body);
+        return g;
+    }
+
+    private void ToggleMenu()
+    {
+        if (_menuVisible) { HideMenu(); return; }
+        ShowMenu();
+    }
+    private async void ShowMenu()
+    {
+        _menuVisible = true;
+        _menuBorder.IsVisible = true;
+        _menuBorder.Opacity = 0; _menuBorder.Scale = 0.85;
+        await Task.WhenAll(_menuBorder.FadeTo(1, 160, Easing.CubicOut), _menuBorder.ScaleTo(1, 160, Easing.CubicOut));
+    }
+    private async void HideMenu()
+    {
+        _menuVisible = false;
+        await Task.WhenAll(_menuBorder.FadeTo(0, 120, Easing.CubicOut), _menuBorder.ScaleTo(0.92, 120, Easing.CubicOut));
+        _menuBorder.IsVisible = false;
     }
 
     private void UpdatePageTitle() => _pageTitleLabel.Text = TitleText;
     private void UpdateTagline() => _taglineLabel.Text = Tagline;
-    private void UpdateLogoutVisibility() => _logoutButton.IsVisible = ShowLogout;
+    private void UpdateUsername() => _usernameMenuLabel.Text = string.IsNullOrWhiteSpace(Username) ? "Not signed in" : Username;
 
     private void OnRequestedThemeChanged(object? sender, AppThemeChangedEventArgs e)
     {
         _toggle.SetState(e.RequestedTheme == AppTheme.Dark, suppressEvent:true, animate:true);
+        // Update menu background for contrast
+        if (Application.Current != null)
+        {
+            var primary = (Color)Application.Current.Resources["Primary"]; _menuBorder.BackgroundColor = primary.WithAlpha(0.90f);
+        }
     }
 
     protected override void OnParentChanged()
@@ -140,6 +237,5 @@ public class DualHeaderView : ContentView
     public void SetTheme(bool dark, bool suppressEvent = true)
     {
         _toggle.SetState(dark, suppressEvent, animate:true);
-        // Background stays primary; controls already update via app theme.
     }
 }

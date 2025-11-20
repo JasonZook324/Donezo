@@ -106,8 +106,12 @@ public class RegisterPage : ContentPage
         var primary = (Color)Application.Current!.Resources["Primary"];
 
         // Header (brand + theme only)
-        _dualHeader = new DualHeaderView { TitleText = "Register", ShowLogout = false };
+        _dualHeader = new DualHeaderView { TitleText = "Register", Username = string.Empty };
         _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
+        _dualHeader.LogoutRequested += (_, __) => { /* not logged in yet */ };
+        _dualHeader.DashboardRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//dashboard"); } catch { } };
+        _dualHeader.ManageAccountRequested += async (_, __) => { /* navigate when implemented */ };
+        _dualHeader.ManageListsRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//dashboard"); } catch { } };
         _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
 
         _usernameEntry = new Entry { Placeholder = "username", Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "RegUsername" };
