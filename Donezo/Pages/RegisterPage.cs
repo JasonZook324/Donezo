@@ -4,6 +4,7 @@ using Microsoft.Maui.Storage;
 using Microsoft.Maui.Controls.Shapes;
 using System.Text.RegularExpressions;
 using System.Linq;
+using Donezo.Pages.Components; // add using for custom theme toggle
 
 namespace Donezo.Pages;
 
@@ -24,6 +25,13 @@ public class RegisterPage : ContentPage
     private Button _toggleConfirmBtn = null!;
     private ActivityIndicator _loadingIndicator = null!;
     private Border _card = null!;
+    private Label _headerLabel = null!; // header text for animation
+    private Label _taglineLabel = null!; // tagline for subtle fade
+    private Grid _logoGrid = null!; // logo container for animation
+
+    // Header theme controls (logout removed per user request)
+    private DualHeaderView _dualHeader = null!; // add field for shared header
+    private int? _currentUserId; // for theme persistence only
 
     private const double FormMaxWidth = 830; // midpoint width
 
@@ -31,20 +39,76 @@ public class RegisterPage : ContentPage
     public RegisterPage(INeonDbService db)
     {
         _db = db;
-        Title = "Register";
+        Title = string.Empty; // remove shell title bar
         BuildUi();
+        Shell.SetNavBarIsVisible(this, false); // hide shell nav bar entirely
+        _ = InitializeHeaderUserContextAsync();
     }
 
     protected override async void OnAppearing()
     {
         base.OnAppearing();
         _card.Opacity = 0;
-        await _card.FadeTo(1, 300, Easing.CubicOut);
+        _headerLabel.Opacity = 0;
+        _taglineLabel.Opacity = 0;
+        _logoGrid.Scale = 0.85;
+        _logoGrid.Rotation = -4;
+        // Fade card + header sequence
+        await _logoGrid.RotateTo(0, 420, Easing.CubicOut);
+        var cardTask = _card.FadeTo(1, 300, Easing.CubicOut);
+        var headerTask = _headerLabel.FadeTo(1, 380, Easing.CubicOut);
+        var taglineTask = _taglineLabel.FadeTo(1, 600, Easing.CubicOut);
+        await Task.WhenAll(cardTask, headerTask, taglineTask);
+        // Gentle scale pulse on header for polish
+        _headerLabel.Scale = 0.94;
+        await _headerLabel.ScaleTo(1, 320, Easing.CubicOut);
+    }
+
+    private async Task InitializeHeaderUserContextAsync()
+    {
+        try
+        {
+            var username = await SecureStorage.GetAsync("AUTH_USERNAME");
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                _currentUserId = await _db.GetUserIdAsync(username);
+                await LoadThemePreferenceAsync();
+            }
+        }
+        catch { }
+    }
+
+    private async Task LoadThemePreferenceAsync()
+    {
+        if (_currentUserId == null) return;
+        var dark = await _db.GetUserThemeDarkAsync(_currentUserId.Value);
+        _dualHeader.SetTheme(dark ?? false, suppressEvent:true);
+        ApplyTheme(dark ?? false);
+    }
+
+    private async Task OnThemeToggledAsync(bool dark)
+    {
+        ApplyTheme(dark);
+        if (_currentUserId != null)
+        {
+            try { await _db.SetUserThemeDarkAsync(_currentUserId.Value, dark); } catch { }
+        }
+    }
+
+    private void ApplyTheme(bool dark)
+    {
+        if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
+        _dualHeader?.SyncFromAppTheme();
     }
 
     private void BuildUi()
     {
         var primary = (Color)Application.Current!.Resources["Primary"];
+
+        // Header (brand + theme only)
+        _dualHeader = new DualHeaderView { TitleText = "Register", ShowLogout = false };
+        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
+        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
 
         _usernameEntry = new Entry { Placeholder = "username", Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "RegUsername" };
         _emailEntry = new Entry { Placeholder = "email", Keyboard = Keyboard.Email, Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "RegEmail" };
@@ -59,12 +123,9 @@ public class RegisterPage : ContentPage
         _toggleConfirmBtn.Clicked += (_, _) => ToggleVisibility(_confirmEntry, _toggleConfirmBtn);
 
         _passwordStrengthLabel = new Label { FontSize = 12, TextColor = Colors.Gray, AutomationId = "RegPasswordStrength" };
-
         _errorLabel = new Label { TextColor = Colors.Red, FontAttributes = FontAttributes.Bold, IsVisible = false, AutomationId = "RegError" };
-
         _registerButton = new Button { Text = "Create Account", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false, AutomationId = "RegSubmit" };
         _registerButton.Clicked += OnRegisterClicked;
-
         _loadingIndicator = new ActivityIndicator { IsVisible = false, IsRunning = false, Color = primary, AutomationId = "RegLoading" };
 
         // Hook validation
@@ -84,8 +145,11 @@ public class RegisterPage : ContentPage
 
         var logo = BuildLogoView();
         var tabsRow = BuildInlineTabs();
-        var header = new Label { Text = "Create Account", FontAttributes = FontAttributes.Bold, FontSize = 26, HorizontalTextAlignment = TextAlignment.Center, TextColor = primary };
-        var tagline = new Label { Text = "Start organizing your tasks", FontSize = 14, HorizontalTextAlignment = TextAlignment.Center, TextColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "Gray400" : "Gray600"], Margin = new Thickness(0,2,0,18) };
+        _headerLabel = new Label { Text = "Create Account", FontAttributes = FontAttributes.Bold, FontSize = 28, HorizontalTextAlignment = TextAlignment.Center, TextColor = primary, AutomationId = "RegHeader" };
+        _taglineLabel = new Label { Text = "Start organizing your tasks", FontSize = 14, HorizontalTextAlignment = TextAlignment.Center, TextColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "Gray400" : "Gray600"], Margin = new Thickness(0,2,0,18), AutomationId = "RegTagline" };
+        // Accessibility semantics
+        SemanticProperties.SetHeadingLevel(_headerLabel, SemanticHeadingLevel.Level1);
+        SemanticProperties.SetDescription(_logoGrid, "Donezo app logo");
 
         var pwRow = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
         pwRow.Add(_passwordEntry, 0, 0); pwRow.Add(_togglePasswordBtn, 1, 0);
@@ -99,8 +163,8 @@ public class RegisterPage : ContentPage
             Children =
             {
                 tabsRow,
-                header,
-                tagline,
+                _headerLabel,
+                _taglineLabel,
                 _errorLabel,
                 new Label { Text = "Username", FontAttributes = FontAttributes.Bold },
                 _usernameEntry,
@@ -153,7 +217,9 @@ public class RegisterPage : ContentPage
             }
         };
 
-        Content = new Grid { Background = gradient, Children = { scroll } };
+        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) }, Background = gradient };
+        root.Add(_dualHeader, 0, 0); root.Add(scroll, 0, 1);
+        Content = root;
     }
 
     private void ToggleVisibility(Entry entry, Button btn)
@@ -200,29 +266,61 @@ public class RegisterPage : ContentPage
         var primary = (Color)Application.Current!.Resources["Primary"];
         var loginBtn = new Button { Text = "Login", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 14, Padding = new Thickness(14,6), CornerRadius = 20, AutomationId = "TabLogin" };
         var registerBtn = new Button { Text = "Register", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 14, Padding = new Thickness(14,6), CornerRadius = 20, AutomationId = "TabRegister" };
+        var loginUnderline = new BoxView { HeightRequest = 3, HorizontalOptions = LayoutOptions.Fill, BackgroundColor = Colors.Transparent, AutomationId = "LoginUnderline" };
+        var registerUnderline = new BoxView { HeightRequest = 3, HorizontalOptions = LayoutOptions.Fill, BackgroundColor = Colors.Transparent, AutomationId = "RegisterUnderline" };
+
+        void ApplyTab(Button btn, BoxView underline, bool active)
+        {
+            btn.BorderColor = primary;
+            btn.BackgroundColor = active ? primary.WithAlpha(0.18f) : Colors.Transparent;
+            btn.FontAttributes = active ? FontAttributes.Bold : FontAttributes.None;
+            underline.BackgroundColor = active ? primary : Colors.Transparent;
+            underline.Opacity = active ? 1 : 0.0;
+        }
         void SyncActive()
         {
             var route = Shell.Current?.CurrentState?.Location?.ToString() ?? string.Empty;
             bool onLogin = route.Contains("login", StringComparison.OrdinalIgnoreCase);
             bool onRegister = route.Contains("register", StringComparison.OrdinalIgnoreCase);
-            loginBtn.BorderColor = primary; registerBtn.BorderColor = primary;
-            loginBtn.BackgroundColor = onLogin ? primary.WithAlpha(0.18f) : Colors.Transparent;
-            registerBtn.BackgroundColor = onRegister ? primary.WithAlpha(0.18f) : Colors.Transparent;
+            ApplyTab(loginBtn, loginUnderline, onLogin);
+            ApplyTab(registerBtn, registerUnderline, onRegister);
         }
         loginBtn.Clicked += async (_, _) => { await Shell.Current.GoToAsync("//login"); SyncActive(); };
         registerBtn.Clicked += async (_, _) => { await Shell.Current.GoToAsync("//register"); SyncActive(); };
         SyncActive();
-        return new HorizontalStackLayout { Spacing = 12, HorizontalOptions = LayoutOptions.Center, Children = { loginBtn, registerBtn } };
+
+        // simple vertical stack with underline row
+        return new VerticalStackLayout
+        {
+            Spacing = 4,
+            HorizontalOptions = LayoutOptions.Center,
+            Children =
+            {
+                new HorizontalStackLayout { Spacing = 12, Children = { loginBtn, registerBtn } },
+                new HorizontalStackLayout
+                {
+                    Spacing = 12,
+                    Children =
+                    {
+                        new Grid { WidthRequest = 80, Children = { loginUnderline } },
+                        new Grid { WidthRequest = 80, Children = { registerUnderline } }
+                    }
+                }
+            }
+        };
     }
 
     private View BuildLogoView()
     {
-        var primary = (Color)Application.Current!.Resources["Primary"];        
+        var primary = (Color)Application.Current!.Resources["Primary"];
         var size = 128d;
         var circle = new Ellipse { WidthRequest = size, HeightRequest = size, Stroke = new SolidColorBrush(primary), StrokeThickness = 8, Fill = Colors.Transparent };
         var check = new Polyline { Stroke = new SolidColorBrush(primary), StrokeThickness = 8, StrokeLineJoin = PenLineJoin.Round, StrokeLineCap = PenLineCap.Round, Points = new PointCollection { new(38,64), new(60,86), new(94,52) } };
-        var grid = new Grid { HorizontalOptions = LayoutOptions.Center, Margin = new Thickness(0,0,0,4), WidthRequest = size, HeightRequest = size };
-        grid.Add(circle); grid.Add(check); return grid;
+        _logoGrid = new Grid { HorizontalOptions = LayoutOptions.Center, Margin = new Thickness(0,0,0,4), WidthRequest = size, HeightRequest = size };
+        _logoGrid.Add(circle); _logoGrid.Add(check);
+        // Decorative shadow pulse effect (initial low opacity)
+        _logoGrid.Shadow = new Shadow { Brush = new SolidColorBrush(primary), Offset = new Point(0,6), Radius = 24, Opacity = 0.22f };
+        return _logoGrid;
     }
 
     private async void OnRegisterClicked(object sender, EventArgs e)

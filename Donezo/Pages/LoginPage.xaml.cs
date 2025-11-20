@@ -3,6 +3,7 @@ using Microsoft.Maui.Controls.Shapes;
 using Donezo.Services;
 using Microsoft.Maui.Storage;
 using System.Text.RegularExpressions;
+using Donezo.Pages.Components; // add
 
 namespace Donezo.Pages;
 
@@ -18,6 +19,10 @@ public class LoginPage : ContentPage
     private ActivityIndicator _loadingIndicator = null!;
     private Border _card = null!;
 
+    // Theme header controls (logout removed per user request)
+    private DualHeaderView _dualHeader = null!;
+    private int? _currentUserId; // loaded if a user already logged in
+
     private const double FormMaxWidth = 830; // midpoint width
 
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
@@ -26,8 +31,10 @@ public class LoginPage : ContentPage
     public LoginPage(INeonDbService db)
     {
         _db = db;
-        Title = "Donezo"; // brand title
+        Title = string.Empty; // remove shell title bar text
+        Shell.SetNavBarIsVisible(this, false); // hide shell nav bar
         BuildUi();
+        _ = InitializeHeaderUserContextAsync();
     }
 
     protected override async void OnAppearing()
@@ -38,9 +45,37 @@ public class LoginPage : ContentPage
         await _card.FadeTo(1, 300, Easing.CubicOut);
     }
 
+    private async Task InitializeHeaderUserContextAsync()
+    {
+        // Only load theme preference if a user is already logged in; no logout button shown.
+        try
+        {
+            var username = await SecureStorage.GetAsync("AUTH_USERNAME");
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                _currentUserId = await _db.GetUserIdAsync(username);
+                await LoadThemePreferenceAsync();
+            }
+        }
+        catch { }
+    }
+
+    private async Task LoadThemePreferenceAsync()
+    {
+        if (_currentUserId == null) return;
+        var dark = await _db.GetUserThemeDarkAsync(_currentUserId.Value);
+        _dualHeader.SetTheme(dark ?? false, suppressEvent:true);
+        ApplyTheme(Application.Current!.RequestedTheme == AppTheme.Dark);
+    }
+
     private void BuildUi()
     {
         var primary = (Color)Application.Current!.Resources["Primary"];
+
+        // Header: brand + visual theme toggle only
+        _dualHeader = new DualHeaderView { TitleText = "Login", ShowLogout = false };
+        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
+        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
 
         _usernameEntry = new Entry { Placeholder = "username", Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "LoginUsername" };
         _passwordEntry = new Entry { Placeholder = "password", IsPassword = true, Style = (Style)Application.Current!.Resources["FilledEntry"], AutomationId = "LoginPassword" };
@@ -154,11 +189,24 @@ public class LoginPage : ContentPage
             }
         };
 
-        Content = new Grid
+        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) }, Background = gradient };
+        root.Add(_dualHeader, 0, 0); root.Add(scroll, 0, 1);
+        Content = root;
+    }
+
+    private async Task OnThemeToggledAsync(bool dark)
+    {
+        ApplyTheme(dark);
+        if (_currentUserId != null)
         {
-            Background = gradient,
-            Children = { scroll }
-        };
+            try { await _db.SetUserThemeDarkAsync(_currentUserId.Value, dark); } catch { }
+        }
+    }
+
+    private void ApplyTheme(bool dark)
+    {
+        if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
+        _dualHeader?.SyncFromAppTheme();
     }
 
     private void TogglePasswordVisibility()

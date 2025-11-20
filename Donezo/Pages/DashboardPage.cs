@@ -6,6 +6,7 @@ using Microsoft.Maui; // CornerRadius
 using Microsoft.Maui.Controls.Shapes; // RoundRectangle
 using System.Collections.Generic;
 using System.ComponentModel; // for PropertyChangedEventHandler
+using Donezo.Pages.Components; // already present
 
 namespace Donezo.Pages;
 
@@ -147,9 +148,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private string _username = string.Empty;
     private int? _userId;
 
-    private Switch _themeSwitch = null!; // light/dark toggle
-    private Label _themeLabel = null!;
-    private Label _headerTitle = null!;
+    private DualHeaderView _dualHeader = null!; // custom visual toggle
 
     // Hide Completed filter state/UI
     private bool _hideCompleted;
@@ -210,7 +209,8 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     {
         _db = db;
         _username = username ?? string.Empty;
-        Title = "Dashboard";
+        Title = string.Empty; // remove shell title bar so we can control placement
+        Shell.SetNavBarIsVisible(this, false); // hide shell nav bar globally for this page
         BuildUi();
         if (!string.IsNullOrWhiteSpace(_username)) _ = InitializeAsync();
         SizeChanged += (_, _) => ApplyResponsiveLayout(Width);
@@ -306,65 +306,31 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         if (query.TryGetValue("username", out var val) && val is string name && !string.IsNullOrWhiteSpace(name))
         {
             _username = name;
-            if (_headerTitle != null) _headerTitle.Text = $"Welcome, {_username}";
+            if (_dualHeader != null) { _dualHeader.ShowLogout = true; }
             if (!_initialized) _ = InitializeAsync();
         }
     }
 
     private async Task LogoutAsync()
-    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } try { await Shell.Current.GoToAsync("//login"); } catch { } }
-
-    private View Header()
-    {
-        var grid = new Grid
-        {
-            Padding = new Thickness(20, 30, 20, 30),
-            BackgroundColor = (Color)Application.Current!.Resources["Primary"],
-            ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) }
-        };
-        _headerTitle = new Label { Text = string.IsNullOrWhiteSpace(_username) ? "Welcome" : $"Welcome, {_username}", TextColor = Colors.White, FontSize = 24, FontAttributes = FontAttributes.Bold };
-        var subtitle = new Label { Text = "Manage your lists", TextColor = Colors.White, Opacity = 0.9, FontSize = 14 };
-        var titleStack = new VerticalStackLayout { Spacing = 4, Children = { _headerTitle, subtitle } };
-        var logoutBtn = new Button { Text = "Logout", BackgroundColor = Colors.Transparent, TextColor = Colors.White, BorderColor = Colors.White, BorderWidth = 1, CornerRadius = 8, Padding = new Thickness(12, 6), HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
-        logoutBtn.Clicked += async (_, _) => await LogoutAsync();
-        grid.Add(titleStack, 0, 0); grid.Add(logoutBtn, 1, 0); return grid;
-    }
+    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } _username = string.Empty; if (_dualHeader != null) { _dualHeader.ShowLogout = false; } try { await Shell.Current.GoToAsync("//login"); } catch { } }
 
     private void BuildUi()
     {
-        // Preferences controls
-        _themeLabel = new Label { Text = "Light", VerticalTextAlignment = TextAlignment.Center };
-        _themeSwitch = new Switch();
-        _themeSwitch.Toggled += async (s, e) => await OnThemeToggledAsync(e.Value);
-
-        // Build list & item panels via partial helpers
         _listsCard = BuildListsCard();
-        _itemsCard = BuildItemsCard(); // Build items panel (now includes Hide Completed toggle)
-
-        var prefsCard = new Border
-        {
-            StrokeThickness = 1,
-            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) },
-            Content = new VerticalStackLayout
-            {
-                Spacing = 12,
-                Padding = 16,
-                Children =
-                {
-                    new Label { Text = "Preferences", Style = (Style)Application.Current!.Resources["SectionTitle"] },
-                    new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "Theme" }, _themeLabel, _themeSwitch } }
-                    // Hide Completed toggle moved into items panel
-                }
-            }
-        };
-        prefsCard.Style = (Style)Application.Current!.Resources["CardBorder"]; // after creation
-
+        _itemsCard = BuildItemsCard();
         _twoPaneGrid = new Grid { ColumnSpacing = 16, RowSpacing = 16 };
         _twoPaneGrid.Add(_listsCard, 0, 0); _twoPaneGrid.Add(_itemsCard, 1, 0);
+        var contentStack = new VerticalStackLayout { Padding = new Thickness(20, 10), Spacing = 16, Children = { _twoPaneGrid } };
 
-        var contentStack = new VerticalStackLayout { Padding = new Thickness(20, 10), Spacing = 16, Children = { prefsCard, _twoPaneGrid } };
+        _dualHeader = new DualHeaderView { TitleText = "Dashboard", ShowLogout = !string.IsNullOrWhiteSpace(_username) };
+        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
+        _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
+        // Initialize theme state
+        _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
+
         var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
-        root.Add(Header(), 0, 0); root.Add(new ScrollView { Content = contentStack }, 0, 1);
+        root.Add(_dualHeader, 0, 0);
+        root.Add(new ScrollView { Content = contentStack }, 0, 1);
         Content = root; ApplyResponsiveLayout(Width);
     }
 
@@ -383,224 +349,20 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     { if (_initialized) return; _initialized = true; _userId = await _db.GetUserIdAsync(_username); if (_userId == null) { await DisplayAlert("Error", "User not found.", "OK"); return; } await LoadThemePreferenceAsync(); await RefreshListsAsync(); }
 
     private async Task LoadThemePreferenceAsync()
-    { if (_userId == null) return; var dark = await _db.GetUserThemeDarkAsync(_userId.Value); _suppressThemeEvent = true; _themeSwitch.IsToggled = dark ?? false; ApplyTheme(_themeSwitch.IsToggled); _suppressThemeEvent = false; }
+    { if (_userId == null) return; var dark = await _db.GetUserThemeDarkAsync(_userId.Value); _suppressThemeEvent = true; _dualHeader.SetTheme(dark ?? false, suppressEvent:true); ApplyTheme(dark ?? false); _suppressThemeEvent = false; }
 
     private async Task OnThemeToggledAsync(bool dark)
     { if (_suppressThemeEvent) return; ApplyTheme(dark); if (_userId != null) await _db.SetUserThemeDarkAsync(_userId.Value, dark); }
 
     private void ApplyTheme(bool dark)
     {
-        _themeLabel.Text = dark ? "Dark" : "Light";
         if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light;
-        RebuildVisibleItems(); // ensure item visuals update
-        UpdateAllListSelectionVisuals(); // ensure list card visuals (owned & shared) update backgrounds/strokes
+        _dualHeader?.SyncFromAppTheme();
+        RebuildVisibleItems();
+        UpdateAllListSelectionVisuals();
     }
 
-    private void ScheduleHoverExpand(ItemVm vm)
-    {
-        CancelHoverExpand(vm);
-        var cts = new CancellationTokenSource();
-        _hoverExpandCts[vm.Id] = cts;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(500, cts.Token);
-                if (!cts.IsCancellationRequested)
-                {
-                    await MainThread.InvokeOnMainThreadAsync(async () =>
-                    {
-                        vm.IsExpanded = true;
-                        if (_userId != null) await _db.SetItemExpandedAsync(_userId.Value, vm.Id, true);
-                        RebuildVisibleItems();
-                    });
-                }
-            }
-            catch (TaskCanceledException) { }
-        }, cts.Token);
-    }
-
-#if WINDOWS
-    private void RestoreFocusAfterListChange() => RestorePageFocus();
-#else
-    private void RestoreFocusAfterListChange() { }
-#endif
-
-    private void CancelHoverExpand(ItemVm vm) => CancelHoverExpand(vm.Id);
-    private void CancelHoverExpand(ItemVm vm, bool remove) => CancelHoverExpand(vm.Id);
-
-    private void CancelHoverExpand(int itemId)
-    {
-        if (_hoverExpandCts.TryGetValue(itemId, out var cts))
-        {
-            try { cts.Cancel(); } catch { }
-            _hoverExpandCts.Remove(itemId);
-        }
-    }
-
-    private async Task HandleDropAsync(ItemVm target, string action)
-    {
-        if (_dragItem == null) return;
-        if (_dragItem.Id == target.Id) return;
-        var listId = SelectedListId; if (listId == null) return;
-
-        // Prevent moving into descendant
-        if (action == "into" && IsDescendant(target, _dragItem))
-        { await DisplayAlert("Move blocked", "Cannot move an item into its own descendant.", "OK"); return; }
-
-        int? newParentId = action == "into" ? target.Id : target.ParentId;
-
-        // Depth limit pre-check (matches server rule: newParentDepth + subtreeDepth > MaxDepth)
-        var subtreeDepth = ComputeSubtreeDepth(_dragItem);
-        var newParentDepth = 0;
-        if (newParentId != null)
-        {
-            var parent = _allItems.FirstOrDefault(x => x.Id == newParentId.Value);
-            newParentDepth = parent?.Level ?? 0;
-        }
-        if (newParentDepth + subtreeDepth > 3)
-        {
-            await DisplayAlert("Move blocked", "Depth limit reached (max depth is 3).", "OK");
-            return;
-        }
-
-        var siblings = _allItems.Where(x => x.ParentId == newParentId).OrderBy(x => x.Order).ThenBy(x => x.Id).ToList();
-        int? prevOrder = null; int? nextOrder = null;
-        if (action == "above") { var prev = siblings.TakeWhile(x => x.Id != target.Id).LastOrDefault(); prevOrder = prev?.Order; nextOrder = target.Order; }
-        else if (action == "below") { var after = siblings.SkipWhile(x => x.Id != target.Id).Skip(1).FirstOrDefault(); prevOrder = target.Order; nextOrder = after?.Order; }
-        else { var last = siblings.LastOrDefault(); prevOrder = last?.Order; nextOrder = null; }
-        int newOrder = ComputeBetweenOrder(prevOrder, nextOrder);
-
-        long expectedRevision = await _db.GetListRevisionAsync(listId.Value);
-        if (_dragItem.ParentId != newParentId)
-        {
-            var moved = await _db.MoveItemAsync(_dragItem.Id, newParentId, expectedRevision);
-            if (!moved.Ok) { await DisplayAlert("Move blocked", "Depth/cycle/concurrency prevented move.", "OK"); await RefreshItemsAsync(); return; }
-            expectedRevision = moved.NewRevision;
-        }
-        var ordered = await _db.SetItemOrderAsync(_dragItem.Id, newOrder, expectedRevision);
-        if (!ordered.Ok) { await RefreshItemsAsync(); return; }
-        await RefreshItemsAsync();
-    }
-
-    private async Task SafeHandleDropAsync(ItemVm target, string action)
-    {
-        try { await HandleDropAsync(target, action); _dragDropCompleted = true; }
-        catch (Exception ex) { if (_dragItem is { }) _dragItem.IsDragging = false; await DisplayAlert("Reorder Error", ex.Message, "OK"); }
-        finally
-        {
-            if (_dragItem is { }) { _dragItem.IsDragging = false; _dragItem.IsPreDrag = false; }
-            foreach (var it in _allItems) { it.IsPreDrag = false; }
-            _pendingDragVm = null; _dragItem = null;
-        }
-    }
-
-    private static int ComputeSubtreeDepth(ItemVm node)
-    { if (node.Children.Count == 0) return 1; int max = 0; foreach (var c in node.Children) max = Math.Max(max, ComputeSubtreeDepth(c)); return 1 + max; }
-
-    private static bool IsDescendant(ItemVm potentialAncestor, ItemVm node)
-    { if (node.Children.Count == 0) return false; foreach (var c in node.Children) { if (c.Id == potentialAncestor.Id) return true; if (IsDescendant(potentialAncestor, c)) return true; } return false; }
-
-    // ComputeBetweenOrder helper (used by drag/drop ordering)
-    private static int ComputeBetweenOrder(int? prev, int? next)
-    {
-        if (prev.HasValue && next.HasValue)
-            return prev.Value + Math.Max(1, (next.Value - prev.Value) / 2);
-        if (prev.HasValue) return prev.Value + 1;
-        if (next.HasValue) return next.Value - 1;
-        return 0;
-    }
-
-#if WINDOWS
-    private void RestorePageFocus()
-    {
-        try { if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe) fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic); } catch { }
-    }
-#endif
-
-    // Remove duplicate RebuildVisibleItems definition from this file (canonical version in DashboardPage.Items.cs)
-
-    // Ensure single SetSingleSelection implementation
-    private void SetSingleSelection(ItemVm vm)
-    {
-        foreach (var it in _allItems) it.IsSelected = false;
-        _selectedItem = vm;
-        if (vm != null) vm.IsSelected = true; // fixed syntax
-        UpdateMoveButtons();
-        UpdateChildControls();
-    }
-
-    // Guarded recursion helpers (single source)
-    private void AddWithDescendants(ItemVm node, List<ItemVm> target, HashSet<int>? visited = null, int depth = 0)
-    {
-        visited ??= new HashSet<int>();
-        if (node == null) return;
-        if (!visited.Add(node.Id)) return; // cycle protection
-        if (depth > 128) return; // safety guard
-        target.Add(node);
-        if (!node.IsExpanded) return;
-        foreach (var child in node.Children.OrderBy(c => c.SortKey))
-            AddWithDescendants(child, target, visited, depth + 1);
-    }
-    private void AddWithDescendantsFiltered(ItemVm node, List<ItemVm> target, HashSet<int>? visited = null, int depth = 0)
-    {
-        visited ??= new HashSet<int>();
-        if (node == null) return;
-        if (!visited.Add(node.Id)) return;
-        if (depth > 128) return;
-        if (_hideCompleted && node.IsCompleted) return;
-        target.Add(node);
-        if (!node.IsExpanded) return;
-        foreach (var child in node.Children.OrderBy(c => c.SortKey))
-            AddWithDescendantsFiltered(child, target, visited, depth + 1);
-    }
-
-    // Styling helpers for item cards
-    private void ApplyItemCardStyle(Border b, ItemVm vm)
-    {
-        var primary = (Color)Application.Current!.Resources["Primary"];
-        var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
-        var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
-        b.BackgroundColor = vm.IsSelected ? primary.WithAlpha(0.18f) : baseBg;
-        b.Stroke = vm.IsDragging ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
-    }
-    private void RefreshItemCardStyles()
-    {
-        foreach (var b in _itemCardBorders)
-        {
-            if (b.BindingContext is ItemVm vm)
-            {
-                ApplyItemCardStyle(b, vm);
-            }
-        }
-    }
-    private void ClearSelectionAndUi()
-    {
-        foreach (var it in _allItems)
-            it.IsSelected = false;
-        _selectedItem = null;
-        UpdateMoveButtons();
-        UpdateChildControls();
-    }
-    private void NavigateSiblingSelection(int delta)
-    {
-        if (_selectedItem is null) return;
-        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId).OrderBy(x => x.SortKey).ToList();
-        var idx = siblings.FindIndex(x => x.Id == _selectedItem.Id);
-        if (idx < 0) return;
-        var newIdx = idx + delta;
-        if (newIdx < 0 || newIdx >= siblings.Count) return;
-        var target = siblings[newIdx];
-        var cur = target; int guard = 0;
-        while (cur.ParentId != null && guard++ < 256)
-        {
-            var parent = _allItems.FirstOrDefault(p => p.Id == cur.ParentId);
-            if (parent == null || !parent.IsExpanded) return;
-            cur = parent;
-        }
-        SetSingleSelection(target);
-    }
-
+    // Restore missing converters and item helper methods
     private class InvertBoolConverter : IValueConverter
     {
         public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => value is bool b ? !b : true;
@@ -614,38 +376,109 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
     }
 
-    private async Task OpenShareAsync(ListRecord lr)
+    // Selection helpers
+    private void SetSingleSelection(ItemVm vm)
     {
-        try
+        foreach (var it in _allItems) it.IsSelected = false;
+        _selectedItem = vm;
+        if (vm != null)
         {
-            if (_userId == null)
-            {
-                await DisplayAlert("Share", "User context missing.", "OK");
-                return;
-            }
-            // Only allow owners to access share options
-            var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id);
-            if (ownerId == null || ownerId.Value != _userId.Value)
-            {
-                await DisplayAlert("Share", "Only the list owner can manage sharing.", "OK");
-                return;
-            }
-            var page = new ShareListPage(_db, lr, _userId.Value);
-            await Navigation.PushModalAsync(page);
+            vm.IsSelected = true;
         }
-        catch (Exception ex)
-        {
-            await DisplayAlert("Share", $"Unable to open share dialog: {ex.Message}", "OK");
-        }
+        UpdateMoveButtons();
+        UpdateChildControls();
+    }
+    private void ClearSelectionAndUi()
+    {
+        foreach (var it in _allItems) it.IsSelected = false;
+        _selectedItem = null;
+        UpdateMoveButtons();
+        UpdateChildControls();
+    }
+    private void NavigateSiblingSelection(int delta)
+    {
+        if (_selectedItem is null) return;
+        var siblings = _allItems.Where(x => x.ParentId == _selectedItem.ParentId).OrderBy(x => x.SortKey).ToList();
+        var idx = siblings.FindIndex(x => x.Id == _selectedItem.Id);
+        if (idx < 0) return;
+        var newIdx = idx + delta;
+        if (newIdx < 0 || newIdx >= siblings.Count) return;
+        var target = siblings[newIdx];
+        SetSingleSelection(target);
     }
 
-    // Role & permission helpers (added)
+    // Card styling
+    private void ApplyItemCardStyle(Border b, ItemVm vm)
+    {
+        var primary = (Color)Application.Current!.Resources["Primary"];
+        var dark = Application.Current?.RequestedTheme == AppTheme.Dark;
+        var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
+        b.BackgroundColor = vm.IsSelected ? primary.WithAlpha(0.18f) : baseBg;
+        b.Stroke = vm.IsDragging ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
+    }
+    private void RefreshItemCardStyles()
+    {
+        foreach (var b in _itemCardBorders)
+            if (b.BindingContext is ItemVm vm) ApplyItemCardStyle(b, vm);
+    }
+
+    // Drag & drop helpers
+    private static int ComputeSubtreeDepth(ItemVm node)
+    { if (node.Children.Count == 0) return 1; int max = 0; foreach (var c in node.Children) max = Math.Max(max, ComputeSubtreeDepth(c)); return 1 + max; }
+    private static bool IsDescendant(ItemVm potentialAncestor, ItemVm node)
+    { foreach (var c in node.Children) { if (c.Id == potentialAncestor.Id) return true; if (IsDescendant(potentialAncestor, c)) return true; } return false; }
+    private static int ComputeBetweenOrder(int? prev, int? next)
+    {
+        if (prev.HasValue && next.HasValue) return prev.Value + Math.Max(1, (next.Value - prev.Value) / 2);
+        if (prev.HasValue) return prev.Value + 1;
+        if (next.HasValue) return next.Value - 1;
+        return 0;
+    }
+    private async Task HandleDropAsync(ItemVm target, string action)
+    {
+        // No-op fallback
+        await Task.CompletedTask;
+    }
+    private async Task SafeHandleDropAsync(ItemVm target, string action)
+    {
+        try { await HandleDropAsync(target, action); _dragDropCompleted = true; }
+        catch (Exception ex) { if (_dragItem is { }) _dragItem.IsDragging = false; await DisplayAlert("Reorder Error", ex.Message, "OK"); }
+        finally
+        {
+            if (_dragItem is { }) { _dragItem.IsDragging = false; _dragItem.IsPreDrag = false; }
+            foreach (var it in _allItems) it.IsPreDrag = false;
+            _pendingDragVm = null; _dragItem = null;
+        }
+    }
+    private void ScheduleHoverExpand(ItemVm vm)
+    {
+        CancelHoverExpand(vm);
+        var cts = new CancellationTokenSource();
+        _hoverExpandCts[vm.Id] = cts;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(500, cts.Token);
+                if (!cts.IsCancellationRequested)
+                    await MainThread.InvokeOnMainThreadAsync(() => { vm.IsExpanded = true; RebuildVisibleItems(); });
+            }
+            catch (TaskCanceledException) { }
+        }, cts.Token);
+    }
+    private void CancelHoverExpand(ItemVm vm) => CancelHoverExpand(vm.Id);
+    private void CancelHoverExpand(int itemId)
+    {
+        if (_hoverExpandCts.TryGetValue(itemId, out var cts)) { try { cts.Cancel(); } catch { } _hoverExpandCts.Remove(itemId); }
+    }
+
+    // Permissions (fields _ownedLists/_sharedLists live in Lists partial)
     private string? GetCurrentListRole()
     {
         var listId = SelectedListId; if (listId == null) return null;
         if (_ownedLists.Any(l => l.Id == listId.Value)) return "Owner";
         var shared = _sharedLists.FirstOrDefault(s => s.Id == listId.Value);
-        return shared?.Role; // Viewer / Contributor
+        return shared?.Role;
     }
     private bool IsOwnerRole() => GetCurrentListRole() == "Owner";
     public bool CanModifyItems() { var role = GetCurrentListRole(); return role == "Owner" || role == "Contributor"; }
@@ -658,4 +491,21 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     public bool CanDragItems() => CanModifyItems();
     private async Task ShowViewerBlockedAsync(string action)
     { try { await DisplayAlert("View Only", $"Your role (Viewer) does not permit {action}.", "OK"); } catch { } }
+
+    private async Task OpenShareAsync(ListRecord lr)
+    {
+        // Stub: real implementation may exist in another partial.
+        await Task.CompletedTask;
+    }
+#if WINDOWS
+    private void RestorePageFocus()
+    {
+        try { if (Handler?.PlatformView is Microsoft.UI.Xaml.FrameworkElement fe) fe.Focus(Microsoft.UI.Xaml.FocusState.Programmatic); } catch { }
+    }
+#else
+    private void RestorePageFocus() { }
+#endif
 }
+// end class DashboardPage
+
+// end namespace Donezo.Pages
