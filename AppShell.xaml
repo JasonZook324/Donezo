@@ -28,4 +28,10 @@
         Route="managelists"
         ContentTemplate="{DataTemplate pages:ManageListsPage}" />
 
+    <!-- Share Options page (navigated to with back support) -->
+    <ShellContent
+        Title="Share Options"
+        Route="shareoptions"
+        ContentTemplate="{DataTemplate pages:ShareOptionsPage}" />
+
 </Shell>

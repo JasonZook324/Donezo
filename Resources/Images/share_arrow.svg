@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke="#39F38C" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- External/share arrow -->
+  <path d="M14 3h7v7"/>
+  <path d="M21 3L10 14"/>
+  <!-- Base box -->
+  <rect x="3" y="10" width="8" height="11" rx="2" ry="2"/>
+</svg>
