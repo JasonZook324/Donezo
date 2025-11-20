@@ -388,26 +388,36 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         daily.SetBinding(IsVisibleProperty, nameof(ListRecord.IsDaily));
         var selectedIcon = new Label { Text = "?", FontSize = 14, TextColor = (Color)Application.Current!.Resources["Primary"], IsVisible = false, VerticalTextAlignment = TextAlignment.Center };
         var primaryColor = (Color)Application.Current!.Resources["Primary"];
-        // Build a reliable share control: vector chain + text
-        var chainIcon = new Grid { WidthRequest = 18, HeightRequest = 14, VerticalOptions = LayoutOptions.Center };
-        var chainLeft = new Border { WidthRequest = 8, HeightRequest = 8, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(4) }, StrokeThickness = 1.2, Stroke = primaryColor, TranslationX = 0, TranslationY = 3 };
-        var chainRight = new Border { WidthRequest = 8, HeightRequest = 8, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(4) }, StrokeThickness = 1.2, Stroke = primaryColor, TranslationX = 10, TranslationY = 3 };
-        var chainConnector = new BoxView { WidthRequest = 6, HeightRequest = 2, Color = primaryColor, TranslationX = 6, TranslationY = 6 };
-        chainIcon.Children.Add(chainLeft); chainIcon.Children.Add(chainRight); chainIcon.Children.Add(chainConnector);
-        var shareText = new Label { Text = "Share", FontSize = 12, TextColor = primaryColor, VerticalTextAlignment = TextAlignment.Center };
-        var shareWrap = new HorizontalStackLayout { Spacing = 4, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center, Children = { chainIcon, shareText } };
-        AutomationProperties.SetName(shareWrap, "Manage Shares");
+        // Share icon: three nodes connected (triangle) - sized 20x20
+        var shareIconGrid = new Grid { WidthRequest = 20, HeightRequest = 20, IsVisible = !isShared, VerticalOptions = LayoutOptions.Center };
+        // Nodes
+        var nodeSize = 6.0;
+        var topNode = new Ellipse { WidthRequest = nodeSize, HeightRequest = nodeSize, Fill = primaryColor, TranslationX = 7, TranslationY = 0 };
+        var leftNode = new Ellipse { WidthRequest = nodeSize, HeightRequest = nodeSize, Fill = primaryColor, TranslationX = 0, TranslationY = 12 };
+        var rightNode = new Ellipse { WidthRequest = nodeSize, HeightRequest = nodeSize, Fill = primaryColor, TranslationX = 14, TranslationY = 12 };
+        // Connectors (lines) using thin BoxViews
+        var lineThickness = 2.0;
+        // Left to top
+        var lineLeftTop = new BoxView { WidthRequest = 2, HeightRequest = 12, Color = primaryColor, TranslationX = 4, TranslationY = 2, Rotation = -55 };
+        // Top to right
+        var lineTopRight = new BoxView { WidthRequest = 2, HeightRequest = 12, Color = primaryColor, TranslationX = 12, TranslationY = 2, Rotation = 55 };
+        // Left to right (base)
+        var lineBase = new BoxView { WidthRequest = 12, HeightRequest = lineThickness, Color = primaryColor, TranslationX = 4, TranslationY = 14 };
+        shareIconGrid.Children.Add(lineLeftTop);
+        shareIconGrid.Children.Add(lineTopRight);
+        shareIconGrid.Children.Add(lineBase);
+        shareIconGrid.Children.Add(topNode);
+        shareIconGrid.Children.Add(leftNode);
+        shareIconGrid.Children.Add(rightNode);
+        AutomationProperties.SetName(shareIconGrid, "Manage Shares");
         var shareTap = new TapGestureRecognizer();
         shareTap.Tapped += (s,e) =>
         {
-            if (!isShared && (shareWrap.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id);
+            if (!isShared && (shareIconGrid.BindingContext is ListRecord lr)) ShowShareOverlay(lr.Id);
         };
-        shareWrap.GestureRecognizers.Add(shareTap);
-
-        if (!isShared) name.SetBinding(Label.TextProperty, nameof(ListRecord.Name));
-        else { name.SetBinding(Label.TextProperty, nameof(SharedListRecord.Name)); role.SetBinding(Label.TextProperty, nameof(SharedListRecord.Role)); }
-
-        var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareWrap, selectedIcon } };
+        shareIconGrid.GestureRecognizers.Add(shareTap);
+        // content stack now uses shareIconGrid instead of previous shareWrap
+        var contentStack = new HorizontalStackLayout { Spacing = 8, Children = { accent, name, role, daily, shareIconGrid, selectedIcon } };
         var border = new Border
         {
             StrokeThickness = 1,
