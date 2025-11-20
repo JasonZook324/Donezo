@@ -13,7 +13,7 @@ public class LoginPage : ContentPage
     private Entry _passwordEntry = null!;
     private Label _loginErrorLabel = null!;
 
-    private const double FormMaxWidth = 520; // standardized width
+    private const double FormMaxWidth = 780; // increased width (50% larger)
 
     // Parameterless ctor for XAML/Shell. Resolves service via ServiceHelper.
     public LoginPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }

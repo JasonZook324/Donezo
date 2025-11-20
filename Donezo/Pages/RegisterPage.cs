@@ -16,7 +16,7 @@ public class RegisterPage : ContentPage
     private Entry _firstNameEntry = null!;
     private Entry _lastNameEntry = null!;
 
-    private const double FormMaxWidth = 520; // standardized width (same as login)
+    private const double FormMaxWidth = 780; // increased width (50% larger)
 
     public RegisterPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
 
