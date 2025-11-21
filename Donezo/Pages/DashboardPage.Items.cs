@@ -18,7 +18,7 @@ public partial class DashboardPage
     private void RebuildVisibleItems()
     {
         var visible = new List<ItemVm>();
-        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.SortKey))
+        foreach (var root in _allItems.Where(x => x.ParentId == null).OrderBy(x => x.Order)) // use Order instead of SortKey so in-memory order changes take immediate effect
         { if (_hideCompleted) TraceAddFiltered(root, visible); else TraceAdd(root, visible); }
         // In-place diff
         for (int i=0;i<visible.Count;i++)
@@ -49,9 +49,9 @@ public partial class DashboardPage
     }
 
     private void TraceAdd(ItemVm node, List<ItemVm> target, HashSet<int>? visited=null, int depth=0)
-    { visited ??= new(); if (node==null) return; if (!visited.Add(node.Id) || depth>64) return; target.Add(node); if (!node.IsExpanded) return; foreach(var c in node.Children.OrderBy(c=>c.SortKey)) TraceAdd(c,target,visited,depth+1); }
+    { visited ??= new(); if (node==null) return; if (!visited.Add(node.Id) || depth>64) return; target.Add(node); if (!node.IsExpanded) return; foreach(var c in node.Children.OrderBy(c=>c.Order)) TraceAdd(c,target,visited,depth+1); }
     private void TraceAddFiltered(ItemVm node, List<ItemVm> target, HashSet<int>? visited=null, int depth=0)
-    { visited ??= new(); if (node==null) return; if (!visited.Add(node.Id) || depth>64) return; if (_hideCompleted && node.IsCompleted) return; target.Add(node); if (!node.IsExpanded) return; foreach(var c in node.Children.OrderBy(c=>c.SortKey)) TraceAddFiltered(c,target,visited,depth+1); }
+    { visited ??= new(); if (node==null) return; if (!visited.Add(node.Id) || depth>64) return; if (_hideCompleted && node.IsCompleted) return; target.Add(node); if (!node.IsExpanded) return; foreach(var c in node.Children.OrderBy(c=>c.Order)) TraceAddFiltered(c,target,visited,depth+1); }
 
     // Build card with controls
     private Border BuildItemsCard()
@@ -150,7 +150,7 @@ public class ChevronDownVisibilityConverter : IMultiValueConverter
         var toInsert = new List<ItemVm>();
         void Trace(ItemVm n)
         {
-            foreach (var c in n.Children.OrderBy(c=>c.SortKey))
+            foreach (var c in n.Children.OrderBy(c=>c.Order))
             {
                 if (_hideCompleted && c.IsCompleted) continue;
                 toInsert.Add(c);
@@ -196,41 +196,26 @@ public class ChevronDownVisibilityConverter : IMultiValueConverter
     private void RemoveLocalSubtree(ItemVm root){ if (root==null) return; var remove=new HashSet<int>(); void Collect(ItemVm n){ if(!remove.Add(n.Id)) return; foreach(var c in n.Children) Collect(c);} Collect(root); _allItems.RemoveAll(a=>remove.Contains(a.Id)); foreach(var vm in _allItems) vm.Children.RemoveAll(c=>remove.Contains(c.Id)); }
 
     // CRUD operations (optimistic)
-    private async Task AddItemAsync(){ var listId=_selectedListId; if(listId==null) return; var name=_newItemEntry.Text?.Trim(); if(string.IsNullOrWhiteSpace(name)) return; int newId; try { newId=await _db.AddItemAsync(listId.Value,name); } catch { return; } _newItemEntry.Text=string.Empty; try{ var rec=await _db.GetItemAsync(newId); if(rec!=null){ var vm=CreateVmFromRecord(rec); // DB already assigns max sparse order placing item at bottom
-                _allItems.Add(vm); vm.RecalcState(); RebuildVisibleItems();
-                // If newly added root item appears at top of visible list, update DB order to reflect that position.
-                if (vm.ParentId==null && _items.Count>0 && ReferenceEquals(_items[0], vm))
+    private async Task AddItemAsync(){ var listId=_selectedListId; if(listId==null) return; var name=_newItemEntry.Text?.Trim(); if(string.IsNullOrWhiteSpace(name)) return; int newId; try { newId=await _db.AddItemAsync(listId.Value,name); } catch { return; } _newItemEntry.Text=string.Empty; try{ var rec=await _db.GetItemAsync(newId); if(rec!=null){ var vm=CreateVmFromRecord(rec); // DB assigns max sparse order placing item at bottom initially
+                _allItems.Add(vm); vm.RecalcState();
+                // Compute top insertion order immediately (smaller than any existing root order)
+                if (vm.ParentId==null)
                 {
-                    // Determine minimum current order among other root items (excluding new one)
                     var otherRoots = _allItems.Where(r=>r.ParentId==null && r.Id!=vm.Id).ToList();
                     if (otherRoots.Count>0)
                     {
                         var minOrder = otherRoots.Min(r=>r.Order);
-                        if (vm.Order >= minOrder) // move it before the previous first root
-                        {
-                            try {
-                                var expected = await _db.GetListRevisionAsync(listId.Value);
-                                int newOrder = minOrder - 1; // simple step earlier than first
-                                var res = await _db.SetItemOrderAsync(vm.Id,newOrder,expected);
-                                if (res.Ok)
-                                {
-                                    vm.Order = newOrder;
-                                    // Resort in-memory roots and rebuild visible list
-                                    var parent = vm.ParentId==null ? null : _allItems.FirstOrDefault(x=>x.Id==vm.ParentId);
-                                    if (parent==null)
-                                    {
-                                        // resort root children by Order
-                                        foreach(var root in _allItems.Where(r=>r.ParentId==null))
-                                            root.Children.Sort((a,b)=>a.Order.CompareTo(b.Order));
-                                    }
-                                    RebuildVisibleItems();
-                                    _lastRevision = res.NewRevision;
-                                    _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                                }
-                            } catch { /* ignore and keep optimistic ordering */ }
-                        }
+                        int newOrder = minOrder - 1; // place before current first
+                        vm.Order = newOrder; // optimistic local set
+                        // Persist new order (best effort)
+                        try {
+                            var expected = await _db.GetListRevisionAsync(listId.Value);
+                            var res = await _db.SetItemOrderAsync(vm.Id,newOrder,expected);
+                            if (res.Ok){ _lastRevision = res.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);} else { /* will be corrected on refresh */ }
+                        } catch { /* ignore transient failures; next refresh will reconcile */ }
                     }
                 }
+                RebuildVisibleItems();
                 UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(5);} else { /* fallback full refresh */ await RefreshItemsAsync(true);} } catch{ await RefreshItemsAsync(true);} HideNewItemOverlay(clear:true); }
 
     // Child item creation removed per requirement.
