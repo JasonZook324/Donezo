@@ -70,6 +70,9 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private BoxView _menuScrim = null!; // captures outside taps
     private bool _userMenuVisible;
 
+    private Grid _busyOverlay; // full-screen loading overlay
+    private ActivityIndicator _busySpinner; private Label _busyLabel; private int _busyDepth;
+
     public ManageListsPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
     public ManageListsPage(INeonDbService db)
     {
@@ -91,51 +94,55 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(_username))
+            await RunWithBusy(async () =>
             {
-                _username = await SecureStorage.GetAsync("AUTH_USERNAME") ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(_username)) _dualHeader.Username = _username;
-            }
-            if (!string.IsNullOrWhiteSpace(_username))
-            {
-                _userId = await _db.GetUserIdAsync(_username);
-                var dark = await _db.GetUserThemeDarkAsync(_userId!.Value);
-                _dualHeader.SetTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark), suppressEvent: true);
-                ApplyThemeInternal(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark));
-                await RefreshListsAsync();
-            }
+                if (string.IsNullOrWhiteSpace(_username))
+                {
+                    _username = await SecureStorage.GetAsync("AUTH_USERNAME") ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(_username)) _dualHeader.Username = _username;
+                }
+                if (!string.IsNullOrWhiteSpace(_username))
+                {
+                    _userId = await _db.GetUserIdAsync(_username);
+                    var dark = await _db.GetUserThemeDarkAsync(_userId!.Value);
+                    _dualHeader.SetTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark), suppressEvent: true);
+                    ApplyThemeInternal(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark));
+                    await RefreshListsAsync();
+                }
+            }, "Initializing...");
         }
-        catch { }
+        catch { HideBusy(); }
     }
 
     private async Task RefreshListsAsync()
     {
         if (_userId == null) return;
-        var ownedRaw = await _db.GetOwnedListsAsync(_userId.Value);
-        var actuallyOwned = new List<ListRecord>();
-        foreach (var lr in ownedRaw)
+        await RunWithBusy(async () =>
         {
-            try { var owner = await _db.GetListOwnerUserIdAsync(lr.Id); if (owner == _userId) actuallyOwned.Add(lr); } catch { }
-        }
-        _ownedLists = actuallyOwned;
-        _sharedLists = await _db.GetSharedListsAsync(_userId.Value);
-
-        await MainThread.InvokeOnMainThreadAsync(() =>
-        {
-            _ownedListsObs = new ObservableCollection<ListRecord>(_ownedLists);
-            _sharedListsObs = new ObservableCollection<SharedListRecord>(_sharedLists);
-            _ownedListsView.ItemsSource = _ownedListsObs;
-            _sharedListsView.ItemsSource = _sharedListsObs;
-
-            if (_selectedListId != null)
+            var ownedRaw = await _db.GetOwnedListsAsync(_userId.Value);
+            var actuallyOwned = new List<ListRecord>();
+            foreach (var lr in ownedRaw)
             {
-                bool stillOwned = !_selectedIsShared && _ownedLists.Any(o => o.Id == _selectedListId);
-                bool stillShared = _selectedIsShared && _sharedLists.Any(s => s.Id == _selectedListId);
-                if (!stillOwned && !stillShared) ClearSelection();
+                try { var owner = await _db.GetListOwnerUserIdAsync(lr.Id); if (owner == _userId) actuallyOwned.Add(lr); } catch { }
             }
-            _sharedEmptyLabel.IsVisible = _sharedLists.Count == 0;
-            UpdateSelectionVisuals();
-        });
+            _ownedLists = actuallyOwned;
+            _sharedLists = await _db.GetSharedListsAsync(_userId.Value);
+            await MainThread.InvokeOnMainThreadAsync(() =>
+            {
+                _ownedListsObs = new ObservableCollection<ListRecord>(_ownedLists);
+                _sharedListsObs = new ObservableCollection<SharedListRecord>(_sharedLists);
+                _ownedListsView.ItemsSource = _ownedListsObs;
+                _sharedListsView.ItemsSource = _sharedListsObs;
+                if (_selectedListId != null)
+                {
+                    bool stillOwned = !_selectedIsShared && _ownedLists.Any(o => o.Id == _selectedListId);
+                    bool stillShared = _selectedIsShared && _sharedLists.Any(s => s.Id == _selectedListId);
+                    if (!stillOwned && !stillShared) ClearSelection();
+                }
+                _sharedEmptyLabel.IsVisible = _sharedLists.Count == 0;
+                UpdateSelectionVisuals();
+            });
+        }, "Loading lists...");
     }
 
     private void BuildUi()
@@ -272,6 +279,19 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _pageOverlay.Children.Add(_menuAlignGrid);
 
         Content = _pageOverlay;
+        // Add busy overlay as last child for highest z-order
+        _busySpinner = new ActivityIndicator { IsRunning = true, Color = (Color)Application.Current!.Resources["Primary"], WidthRequest = 32, HeightRequest = 32 };
+        _busyLabel = new Label { Text = "Loading...", TextColor = Colors.White, FontSize = 14, HorizontalTextAlignment = TextAlignment.Center };
+        var busyCard = new Border
+        {
+            BackgroundColor = Colors.Black.WithAlpha(0.75f),
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(14) },
+            Padding = new Thickness(20,16),
+            Content = new VerticalStackLayout { Spacing = 8, Children = { _busySpinner, _busyLabel } }
+        };
+        _busyOverlay = new Grid { IsVisible = false, BackgroundColor = Colors.Transparent, Children = { new Grid { VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.Center, Children = { busyCard } } } };
+        AbsoluteLayout.SetLayoutBounds(_busyOverlay, new Rect(0,0,1,1)); AbsoluteLayout.SetLayoutFlags(_busyOverlay, AbsoluteLayoutFlags.All);
+        _pageOverlay.Children.Add(_busyOverlay);
     }
 
     private async Task ShowUserMenuAsync()
@@ -452,19 +472,22 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private async Task GenerateShareCodeAsync()
     {
         if (_shareListId == null) return;
-        var role = _newCodeRolePicker.SelectedItem as string ?? "Viewer";
-        int maxRedeems = 0; if (int.TryParse(_newCodeMaxRedeemsEntry.Text?.Trim(), out var mr) && mr >= 0) maxRedeems = mr;
-        DateTime? expiration = null;
-        if (_newCodeHasExpiry.IsChecked)
+        await RunWithBusy(async () =>
         {
-            try
+            var role = _newCodeRolePicker.SelectedItem as string ?? "Viewer";
+            int maxRedeems = 0; if (int.TryParse(_newCodeMaxRedeemsEntry.Text?.Trim(), out var mr) && mr >= 0) maxRedeems = mr;
+            DateTime? expiration = null;
+            if (_newCodeHasExpiry.IsChecked)
             {
-                var local = DateTime.SpecifyKind(_newCodeExpireDatePicker.Date.Date, DateTimeKind.Local);
-                expiration = local.ToUniversalTime();
+                try
+                {
+                    var local = DateTime.SpecifyKind(_newCodeExpireDatePicker.Date.Date, DateTimeKind.Local);
+                    expiration = local.ToUniversalTime();
+                }
+                catch { expiration = null; }
             }
-            catch { expiration = null; }
-        }
-        try { await _db.CreateShareCodeAsync(_shareListId.Value, role, expiration, maxRedeems); await RefreshShareAsync(); _newCodeMaxRedeemsEntry.Text = string.Empty; _newCodeHasExpiry.IsChecked = false; } catch { }
+            try { await _db.CreateShareCodeAsync(_shareListId.Value, role, expiration, maxRedeems); await RefreshShareAsync(); _newCodeMaxRedeemsEntry.Text = string.Empty; _newCodeHasExpiry.IsChecked = false; } catch { }
+        }, "Generating code...");
     }
 
     private async Task RefreshShareAsync()
@@ -747,8 +770,51 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     { if (_userId == null) return; var name = _newListEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(name)) return; await _db.CreateListAsync(_userId.Value, name, _dailyCheck.IsChecked); HideNewListOverlay(clear: true); ClearSelection(); await RefreshListsAsync(); }
 
     private async Task DeleteSelectedAsync()
-    { if (_selectedListId == null) return; if (_selectedIsShared || !_ownedLists.Any(o => o.Id == _selectedListId)) { await DisplayAlert("Delete", "Only owners can delete lists.", "OK"); return; } var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return; if (await _db.DeleteListAsync(_selectedListId.Value)) { ClearSelection(); await RefreshListsAsync(); } }
+    {
+        if (_selectedListId == null) return; if (_selectedIsShared || !_ownedLists.Any(o => o.Id == _selectedListId)) { await DisplayAlert("Delete", "Only owners can delete lists.", "OK"); return; }
+        var confirm = await DisplayAlert("Delete List", "Are you sure? This will remove all items.", "Delete", "Cancel"); if (!confirm) return;
+        await RunWithBusy(async () =>
+        {
+            if (await _db.DeleteListAsync(_selectedListId.Value)) { ClearSelection(); await RefreshListsAsync(); }
+        }, "Deleting list...");
+    }
 
     private async Task RedeemShareCodeAsync()
-    { var code = _shareCodeEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(code) || _userId == null) return; var (ok, listId, list, membership) = await _db.RedeemShareCodeByCodeAsync(_userId.Value, code); if (!ok || listId == null || list == null || membership == null) { await DisplayAlert("Redeem", "Invalid or unusable code.", "OK"); return; } _shareCodeEntry.Text = string.Empty; _selectedListId = list.Id; _selectedIsShared = true; UpdateSelectionVisuals(); await RefreshListsAsync(); }
+    {
+        var code = _shareCodeEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(code) || _userId == null) return;
+        await RunWithBusy(async () =>
+        {
+            var (ok, listId, list, membership) = await _db.RedeemShareCodeByCodeAsync(_userId.Value, code);
+            if (!ok || listId == null || list == null || membership == null)
+            { await DisplayAlert("Redeem", "Invalid or unusable code.", "OK"); return; }
+            _shareCodeEntry.Text = string.Empty; _selectedListId = list.Id; _selectedIsShared = true; UpdateSelectionVisuals(); await RefreshListsAsync();
+        }, "Redeeming code...");
+    }
+
+    private void ShowBusy(string message)
+    {
+        _busyDepth++;
+        _busyLabel.Text = message ?? "Loading...";
+        if (!_busyOverlay.IsVisible)
+        {
+            _busyOverlay.IsVisible = true;
+            _busyOverlay.Opacity = 0; _ = _busyOverlay.FadeTo(1,120,Easing.CubicOut);
+        }
+    }
+    private void HideBusy()
+    {
+        if (_busyDepth > 0) _busyDepth--;
+        if (_busyDepth > 0) return; // still in nested busy
+        if (_busyOverlay.IsVisible)
+        {
+            _ = _busyOverlay.FadeTo(0,100,Easing.CubicOut).ContinueWith(_ => MainThread.BeginInvokeOnMainThread(() => _busyOverlay.IsVisible = false));
+        }
+    }
+    private async Task RunWithBusy(Func<Task> work, string message)
+    {
+        ShowBusy(message);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try { await work(); }
+        finally { sw.Stop(); HideBusy(); }
+    }
 }
