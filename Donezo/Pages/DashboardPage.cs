@@ -8,6 +8,8 @@ using System.Collections.Generic;
 using System.ComponentModel; // for PropertyChangedEventHandler
 using Donezo.Pages.Components; // already present
 using Microsoft.Maui.Layouts; // AbsoluteLayoutFlags
+using Donezo.Pages.Components; // ensure namespace for BusyOverlayView
+using System.Threading.Tasks; // added for Task
 
 namespace Donezo.Pages;
 
@@ -42,15 +44,7 @@ public class LevelBadgeConverter : IValueConverter
 {
     public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
     {
-        if (value is ItemVm vm)
-        {
-            return vm.Level switch
-            {
-                1 => string.Empty,
-                2 => "-",
-                _ => "--"
-            };
-        }
+        // Badges ("-" / "--") no longer needed due to indentation + expand chevrons.
         return string.Empty;
     }
     public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
@@ -59,6 +53,20 @@ public class LevelIndentConverter : IValueConverter
 {
     public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
         => value is int lvl ? new Thickness((lvl - 1) * 16, 0, 0, 0) : new Thickness(0);
+    public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
+}
+public class LevelBorderGapConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
+    {
+        if (value is int lvl)
+        {
+            var left = (lvl - 1) * 16; if (left < 0) left = 0;
+            // top gap 2 to match existing bottomGap design
+            return new Thickness(left, 2, 0, 0);
+        }
+        return new Thickness(0,2,0,0);
+    }
     public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
 }
 public class BoolToRotationConverter : IValueConverter
@@ -81,7 +89,7 @@ public class ItemVm : BindableObject
     public string Name { get => _name; set { if (_name == value) return; _name = value; OnPropertyChanged(nameof(Name)); } }
     public bool ShowCompletedUser => IsCompleted && !string.IsNullOrWhiteSpace(CompletedByUsername);
     private string? _completedByUsername;
-    public string? CompletedByUsername { get => _completedByUsername; set { if (_completedByUsername == value) return; _completedByUsername = value; OnPropertyChanged(nameof(CompletedByUsername)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
+    public string? CompletedByUsername { get => _completedByUsername; set { if (_completedByUsername == value) return; _completedByUsername = value; OnPropertyChanged(nameof(CompletedByUsername)); OnPropertyChanged(nameof(ShowCompletedUser)); OnPropertyChanged(nameof(CompletedInfo)); OnPropertyChanged(nameof(ShowCompletedInfo)); } }
     private bool _isCompleted;
     public bool IsCompleted { get => _isCompleted; set { if (_isCompleted == value) return; _isCompleted = value; OnPropertyChanged(nameof(IsCompleted)); OnPropertyChanged(nameof(ShowCompletedUser)); } }
     public int? ParentId { get; }
@@ -120,6 +128,22 @@ public class ItemVm : BindableObject
     private string _editableName = string.Empty;
     public string EditableName { get => _editableName; set { if (_editableName == value) return; _editableName = value; OnPropertyChanged(nameof(EditableName)); } }
 
+    private DateTime? _completedAtUtc;
+    public DateTime? CompletedAtUtc { get => _completedAtUtc; set { if (_completedAtUtc == value) return; _completedAtUtc = value; OnPropertyChanged(nameof(CompletedAtUtc)); OnPropertyChanged(nameof(CompletedInfo)); OnPropertyChanged(nameof(ShowCompletedInfo)); } }
+    public bool ShowCompletedInfo => IsCompleted && (!string.IsNullOrWhiteSpace(CompletedByUsername) || CompletedAtUtc != null);
+    public string CompletedInfo
+    {
+        get
+        {
+            if (!IsCompleted) return string.Empty;
+            var user = string.IsNullOrWhiteSpace(CompletedByUsername) ? "" : CompletedByUsername;
+            // Updated format to include year
+            var date = CompletedAtUtc?.ToLocalTime().ToString("M/d/yyyy HH:mm") ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(date)) return user + " • " + date;
+            if (!string.IsNullOrWhiteSpace(user)) return user;
+            return date;
+        }
+    }
     public CompletionVisualState CompletionState { get; private set; }
     public string PartialGlyph => CompletionState == CompletionVisualState.Partial ? "-" : string.Empty;
     public string ExpandGlyph => HasChildren ? (_isExpanded ? "v" : ">") : string.Empty;
@@ -163,9 +187,10 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private Border _itemsCard = null!;
 
     // Polling state
-    private CancellationTokenSource? _pollCts;
+    private CancellationTokenSource? _pollCts; // already declared; ensure used by polling logic
     private long _lastRevision;
     private bool _isRefreshing;
+    private DateTime _skipAutoRefreshUntil; // suppression window for auto refresh
 
     // Hover auto-expand timers
     private readonly Dictionary<int, CancellationTokenSource> _hoverExpandCts = new();
@@ -211,6 +236,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private BoxView _menuScrim = null!; // captures outside taps
     private bool _userMenuVisible;
 
+    // Search and filter fields
+    private Entry _searchEntry; // search box (items panel)
+    private Label _statsLabel; // stats label (items panel)
+    private string _itemSearchText = string.Empty; // current search text
+
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
 
@@ -238,6 +268,14 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         }
     }
 
+    // Busy overlay fields
+    private BusyOverlayView _busyOverlay; // overlay instance
+
+    // Busy helpers
+    private void ShowBusy(string msg){ _busyOverlay?.Show(msg); }
+    private void HideBusy(){ _busyOverlay?.Hide(); }
+    private async Task RunBusy(Func<Task> op,string msg){ if(_busyOverlay==null){ await op(); return;} await _busyOverlay.RunAsync(op,msg); }
+
     private async Task InitializeAsync()
     {
         if (_initialized) return;
@@ -245,14 +283,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _userId = await _db.GetUserIdAsync(_username);
         if (_userId == null) return;
         await LoadThemePreferenceAsync();
-        await RefreshListsAsync();
-    }
-
-    private async Task LogoutAsync()
-    {
-        try { SecureStorage.Remove("AUTH_USERNAME"); } catch { }
-        _username = string.Empty; if (_dualHeader != null) _dualHeader.Username = string.Empty;
-        try { await Shell.Current.GoToAsync("//login"); } catch { }
+        await RefreshListsPickerAsync();
     }
 
     private async Task LoadThemePreferenceAsync()
@@ -272,6 +303,16 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         if (_userId != null) { try { await _db.SetUserThemeDarkAsync(_userId.Value, dark); } catch { } }
     }
 
+    private async Task LogoutAsync()
+    {
+        try { SecureStorage.Remove("AUTH_USERNAME"); } catch { }
+        _username = string.Empty; if (_dualHeader != null) _dualHeader.Username = string.Empty;
+        try { await Shell.Current.GoToAsync("//login"); } catch { }
+    }
+
+    // Duplicate busy-wrapped RefreshItemsAsync and RefreshItemsInternalAsync removed to eliminate ambiguity.
+    // Use the canonical implementation in DashboardPage.Items.cs. Busy overlay can be applied manually if desired.
+
     private void ApplyTheme(bool dark)
     {
         if (Application.Current is App app)
@@ -288,13 +329,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
 
     private void BuildUi()
     {
-        _listPicker = new Picker { Title = "Select List" };
-        // Ensure picker displays list names instead of record type names for both owned and shared list records.
-        _listPicker.ItemDisplayBinding = new Binding("Name");
+        _listPicker = new Picker { Title = "Select List", ItemDisplayBinding = new Binding("Name") };
         _listPicker.SelectedIndexChanged += async (s,e)=>
         {
-            if (_listPicker.SelectedItem is ListRecord lr) { _selectedListId = lr.Id; await RefreshItemsAsync(userInitiated:true); }
-            else if (_listPicker.SelectedItem is SharedListRecord sl) { _selectedListId = sl.Id; await RefreshItemsAsync(userInitiated:true); }
+            if (_listPicker.SelectedItem is ListRecord lr) { _selectedListId = lr.Id; await RefreshItemsAsync(true); StartRevisionPolling(); }
+            else if (_listPicker.SelectedItem is SharedListRecord sl) { _selectedListId = sl.Id; await RefreshItemsAsync(true); StartRevisionPolling(); }
         };
         _itemsCard = BuildItemsCard();
         var contentStack = new VerticalStackLayout { Padding = new Thickness(20,10), Spacing = 16, Children = { _listPicker, _itemsCard } };
@@ -372,6 +411,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _pageOverlay.Children.Add(_menuAlignGrid); // overlay dropdown
 
         Content = _pageOverlay;
+        // Busy overlay last child for z-order
+        _busyOverlay = new BusyOverlayView();
+        AbsoluteLayout.SetLayoutBounds(_busyOverlay, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_busyOverlay, AbsoluteLayoutFlags.All);
+        _pageOverlay.Children.Add(_busyOverlay);
     }
 
     private async void ToggleUserMenu()
@@ -471,6 +515,21 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         UpdateChildControls();
     }
 
+    // Helper used by items partial
+    private bool IsUnder(ItemVm parent, ItemVm candidate)
+    {
+        if (parent == null || candidate == null || parent.Id == candidate.Id) return false;
+        var cur = candidate; int guard = 0;
+        while (cur.ParentId != null && guard++ < 256)
+        {
+            var p = _allItems.FirstOrDefault(x => x.Id == cur.ParentId);
+            if (p == null) break;
+            if (p.Id == parent.Id) return true;
+            cur = p;
+        }
+        return false;
+    }
+
     // Card styling
     private void ApplyItemCardStyle(Border b, ItemVm vm)
     {
@@ -539,5 +598,121 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             foreach (var it in _allItems) it.IsPreDrag = false;
             _pendingDragVm = null; _dragItem = null;
         }
+    }
+
+    private bool PollingSuppressed => _suppressListRevisionCheck; // alias to Items partial field
+    private void StartRevisionPolling()
+    {
+        StopRevisionPolling();
+        _pollCts = new CancellationTokenSource();
+        var token = _pollCts.Token;
+        Dispatcher.StartTimer(TimeSpan.FromSeconds(2), () =>
+        {
+            if (token.IsCancellationRequested) return false;
+            if (_selectedListId == null) return true;
+            if (PollingSuppressed || _isRefreshing) return true;
+            _ = CheckRevisionAsync();
+            return true;
+        });
+    }
+    private void StopRevisionPolling()
+    {
+        try { _pollCts?.Cancel(); } catch { }
+        _pollCts = null;
+    }
+    protected override void OnAppearing()
+    {
+        base.OnAppearing();
+        if (_selectedListId != null) StartRevisionPolling();
+    }
+    protected override void OnDisappearing()
+    {
+        base.OnDisappearing();
+        StopRevisionPolling();
+    }
+    private async Task CheckRevisionAsync()
+    {
+        if (_selectedListId == null) return;
+        try
+        {
+            var current = await _db.GetListRevisionAsync(_selectedListId.Value);
+            if (current != _lastRevision)
+            {
+                // If within suppression window, accept new revision but skip heavy refresh
+                if (DateTime.UtcNow < _skipAutoRefreshUntil)
+                {
+                    _lastRevision = current; // acknowledge without refresh
+                    return;
+                }
+                _lastRevision = current;
+                await RefreshItemsAsync(false);
+            }
+        }
+        catch { }
+    }
+
+    private void UpdateMoveButtons()
+    {
+        // Ensure buttons exist
+        if (_moveUpButton == null || _moveDownButton == null || _resetSubtreeButton == null) return;
+        bool hasSelection = _selectedItem != null;
+        bool canReorder = hasSelection && CanReorderItems();
+        _moveUpButton.IsEnabled = canReorder;
+        _moveDownButton.IsEnabled = canReorder;
+        _resetSubtreeButton.IsEnabled = hasSelection && CanResetSubtree();
+    }
+    private void UpdateChildControls()
+    {
+        if (_newChildEntry == null || _addChildButton == null) return;
+        if (_selectedItem == null)
+        {
+            _newChildEntry.IsVisible = false;
+            _addChildButton.IsVisible = false;
+            _addChildButton.IsEnabled = false;
+            return;
+        }
+        bool canAdd = _selectedItem.Level < 3 && CanAddItems();
+        _newChildEntry.IsVisible = canAdd;
+        _addChildButton.IsVisible = canAdd;
+        _addChildButton.IsEnabled = canAdd && !string.IsNullOrWhiteSpace(_newChildEntry.Text);
+    }
+    private void UpdateStats()
+    {
+        if (_statsLabel == null) return;
+        int total = _allItems.Count;
+        int completed = _allItems.Count(i => i.IsCompleted);
+        int shown = _items.Count;
+        _statsLabel.Text = $"Shown {shown} / Total {total} • Completed {completed}";
+        _statsLabel.TextColor = completed == total && total > 0 ? Color.FromArgb("#008A2E") : (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "Gray300" : "Gray600"];
+    }
+
+    private DateTime _recentLocalMutationUtc; // last local add/delete/child mutation time
+
+    private async Task LoadHideCompletedPreferenceForSelectedListAsync()
+    {
+        if (_userId == null || _selectedListId == null) return;
+        try
+        {
+            var pref = await _db.GetListHideCompletedAsync(_userId.Value, _selectedListId.Value);
+            _hideCompleted = pref ?? false;
+            if (_hideCompletedSwitch != null)
+            {
+                _suppressHideCompletedEvent = true;
+                _hideCompletedSwitch.IsToggled = _hideCompleted;
+                _suppressHideCompletedEvent = false;
+            }
+        }
+        catch { }
+    }
+
+    private async Task OnHideCompletedToggledAsync(bool value)
+    {
+        if (_suppressHideCompletedEvent) return;
+        _hideCompleted = value;
+        if (_userId != null && _selectedListId != null)
+        {
+            try { await _db.SetListHideCompletedAsync(_userId.Value, _selectedListId.Value, value); } catch { }
+        }
+        RebuildVisibleItems();
     }
 }
