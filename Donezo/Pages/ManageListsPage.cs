@@ -5,6 +5,7 @@ using Microsoft.Maui.Storage;
 using System.Collections.ObjectModel;
 using System.Linq;
 using Donezo.Pages.Components;
+using Microsoft.Maui.Layouts; // for AbsoluteLayoutFlags
 
 namespace Donezo.Pages;
 
@@ -62,6 +63,13 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private CheckBox _newCodeHasExpiry = null!;
     private Button _generateCodeButton = null!;
 
+    // User menu overlay (like DashboardPage)
+    private AbsoluteLayout _pageOverlay = null!; // overlay root
+    private Grid _menuAlignGrid = null!; // alignment grid for menu (right aligned)
+    private Border _userMenuBorder = null!; // dropdown container
+    private BoxView _menuScrim = null!; // captures outside taps
+    private bool _userMenuVisible;
+
     public ManageListsPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
     public ManageListsPage(INeonDbService db)
     {
@@ -93,7 +101,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                 _userId = await _db.GetUserIdAsync(_username);
                 var dark = await _db.GetUserThemeDarkAsync(_userId!.Value);
                 _dualHeader.SetTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark), suppressEvent: true);
-                ApplyTheme(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark));
+                ApplyThemeInternal(dark ?? (Application.Current!.RequestedTheme == AppTheme.Dark));
                 await RefreshListsAsync();
             }
         }
@@ -133,10 +141,11 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private void BuildUi()
     {
         _dualHeader = new DualHeaderView { TitleText = "Manage Lists", Username = string.Empty };
-        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
-        _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
+        _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledInternalAsync(dark);
+        _dualHeader.LogoutRequested += async (_, __) => await LogoutInternalAsync();
         _dualHeader.DashboardRequested += async (_, __) => { try { await Shell.Current.GoToAsync($"//dashboard?username={Uri.EscapeDataString(_username)}"); } catch { } };
         _dualHeader.ManageListsRequested += (_, __) => { };
+        _dualHeader.UserMenuToggleRequested += (_, __) => ToggleUserMenu();
         _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent: true);
 
         _shareCodeEntry = new Entry { Placeholder = "Redeem share code", Style = (Style)Application.Current!.Resources["FilledEntry"] };
@@ -207,10 +216,102 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _shareModal = BuildShareModal();
         var shareBackdropTap = new TapGestureRecognizer(); shareBackdropTap.Tapped += (_, __) => HideShareOverlay(); _shareOverlay.GestureRecognizers.Add(shareBackdropTap);
         _shareOverlay.Children.Add(new Grid { VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.Center, Children = { _shareModal } });
-        root.Children.Add(_shareOverlay); // root already defined earlier in method
+        root.Children.Add(_shareOverlay);
 
-        Content = root;
+        // Build user-menu overlay (wrap root in AbsoluteLayout)
+        _pageOverlay = new AbsoluteLayout { IsClippedToBounds = false };
+        AbsoluteLayout.SetLayoutBounds(root, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(root, AbsoluteLayoutFlags.All);
+
+        // Scrim for user menu
+        _menuScrim = new BoxView { BackgroundColor = Colors.Transparent, IsVisible = false, InputTransparent = true };
+        var scrimTap = new TapGestureRecognizer();
+        scrimTap.Tapped += async (_, __) => await HideUserMenuAsync();
+        _menuScrim.GestureRecognizers.Add(scrimTap);
+        AbsoluteLayout.SetLayoutBounds(_menuScrim, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_menuScrim, AbsoluteLayoutFlags.All);
+
+        // Dropdown content from header
+        var primary = (Color)Application.Current!.Resources["Primary"];
+        var menuContent = _dualHeader.GetMenuContentStack();
+        _userMenuBorder = new Border
+        {
+            StrokeThickness = 1,
+            Stroke = Colors.White.WithAlpha(0.35f),
+            BackgroundColor = primary.WithAlpha(0.90f),
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) },
+            Padding = new Thickness(14, 12),
+            Content = menuContent,
+            TranslationY = 60,
+            Opacity = 0,
+            IsVisible = false,
+            Shadow = new Shadow { Brush = Brush.Black, Offset = new Point(0,4), Radius = 12, Opacity = 0.35f },
+            HorizontalOptions = LayoutOptions.End,
+            VerticalOptions = LayoutOptions.Start
+        };
+
+        _menuAlignGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitionCollection
+            {
+                new ColumnDefinition(GridLength.Star),
+                new ColumnDefinition(GridLength.Auto)
+            },
+            Margin = new Thickness(0,0,6,0),
+            InputTransparent = true,
+            IsVisible = false
+        };
+        Grid.SetColumn(_userMenuBorder, 1);
+        _menuAlignGrid.Children.Add(_userMenuBorder);
+        AbsoluteLayout.SetLayoutBounds(_menuAlignGrid, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_menuAlignGrid, AbsoluteLayoutFlags.All);
+
+        // Compose overlay
+        _pageOverlay.Children.Add(root);
+        _pageOverlay.Children.Add(_menuScrim);
+        _pageOverlay.Children.Add(_menuAlignGrid);
+
+        Content = _pageOverlay;
     }
+
+    private async Task ShowUserMenuAsync()
+    {
+        _userMenuVisible = true;
+        _menuScrim.IsVisible = true;
+        _menuScrim.InputTransparent = false;
+        _menuAlignGrid.IsVisible = true;
+        _menuAlignGrid.InputTransparent = false;
+        _userMenuBorder.Scale = 0.85;
+        _userMenuBorder.IsVisible = true;
+        await Task.WhenAll(_userMenuBorder.FadeTo(1, 160, Easing.CubicOut), _userMenuBorder.ScaleTo(1, 160, Easing.CubicOut));
+    }
+
+    private async Task HideUserMenuAsync()
+    {
+        _userMenuVisible = false;
+        await Task.WhenAll(_userMenuBorder.FadeTo(0, 120, Easing.CubicOut), _userMenuBorder.ScaleTo(0.92, 120, Easing.CubicOut));
+        _userMenuBorder.IsVisible = false;
+        _menuAlignGrid.InputTransparent = true;
+        _menuAlignGrid.IsVisible = false;
+        _menuScrim.InputTransparent = true;
+        _menuScrim.IsVisible = false;
+    }
+
+    private void ToggleUserMenu()
+    {
+        if (string.IsNullOrWhiteSpace(_dualHeader?.Username)) return;
+        if (_userMenuVisible) _ = HideUserMenuAsync(); else _ = ShowUserMenuAsync();
+    }
+
+    // Internal wrappers to avoid duplicate-named methods
+    private async Task OnThemeToggledInternalAsync(bool dark)
+    { ApplyThemeInternal(dark); if (_userId != null) { try { await _db.SetUserThemeDarkAsync(_userId.Value, dark); } catch { } } }
+
+    private void ApplyThemeInternal(bool dark)
+    { if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light; _dualHeader?.SyncFromAppTheme(); }
+
+    private async Task LogoutInternalAsync()
+    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } _username = string.Empty; _dualHeader.Username = string.Empty; try { await Shell.Current.GoToAsync("//login"); } catch { } }
 
     private Border BuildShareModal()
     {
@@ -344,7 +445,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                 }
             }
         };
-        if (Application.Current!.Resources.TryGetValue("CardBorder", out var styleObj) && styleObj is Style style) modal.Style = style;
+        if (Application.Current!.Resources.TryGetValue("CardBorder", out var styleObj) && styleObj is Style style2) modal.Style = style2;
         return modal;
     }
 
@@ -650,13 +751,4 @@ public class ManageListsPage : ContentPage, IQueryAttributable
 
     private async Task RedeemShareCodeAsync()
     { var code = _shareCodeEntry.Text?.Trim(); if (string.IsNullOrWhiteSpace(code) || _userId == null) return; var (ok, listId, list, membership) = await _db.RedeemShareCodeByCodeAsync(_userId.Value, code); if (!ok || listId == null || list == null || membership == null) { await DisplayAlert("Redeem", "Invalid or unusable code.", "OK"); return; } _shareCodeEntry.Text = string.Empty; _selectedListId = list.Id; _selectedIsShared = true; UpdateSelectionVisuals(); await RefreshListsAsync(); }
-
-    private async Task OnThemeToggledAsync(bool dark)
-    { ApplyTheme(dark); if (_userId != null) { try { await _db.SetUserThemeDarkAsync(_userId.Value, dark); } catch { } } }
-
-    private void ApplyTheme(bool dark)
-    { if (Application.Current is App app) app.UserAppTheme = dark ? AppTheme.Dark : AppTheme.Light; _dualHeader?.SyncFromAppTheme(); }
-
-    private async Task LogoutAsync()
-    { try { SecureStorage.Remove("AUTH_USERNAME"); } catch { } _username = string.Empty; _dualHeader.Username = string.Empty; try { await Shell.Current.GoToAsync("//login"); } catch { } }
 }
