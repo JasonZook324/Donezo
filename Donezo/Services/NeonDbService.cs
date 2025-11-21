@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System;
 using System.Linq;
 using System.Text;
+using System.Text.Json; // added for logging data serialization
 
 namespace Donezo.Services;
 
@@ -61,6 +62,9 @@ public interface INeonDbService
     Task<bool> UpdateUsernameAsync(int userId, string newUsername, CancellationToken ct = default);
     Task<bool> UpdateEmailAsync(int userId, string newEmail, CancellationToken ct = default);
     Task<bool> UpdatePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default);
+    // Logging API additions
+    Task<int> LogAsync(string level, string eventType, string message, int? userId = null, int? listId = null, int? itemId = null, object? data = null, CancellationToken ct = default);
+    Task<IReadOnlyList<LogRecord>> GetLogsAsync(int? userId = null, string? level = null, string? eventType = null, DateTime? sinceUtc = null, int limit = 100, CancellationToken ct = default);
 }
 
 public record ListRecord(int Id, string Name, bool IsDaily); // unchanged; soft-deleted lists are filtered out
@@ -69,8 +73,9 @@ public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int?
 public record ShareCodeRecord(int Id, int ListId, string Code, string Role, DateTime? ExpirationUtc, int MaxRedeems, int RedeemedCount, bool IsDeleted);
 public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked, string? Code);
 public record UserProfileRecord(int Id, string Username, string? Email, string FirstName, string LastName, DateTime CreatedAt);
+public record LogRecord(int Id, DateTime OccurredAtUtc, string Level, string EventType, string Message, int? UserId, int? ListId, int? ItemId, string? DataJson); // logging record
 
-public class NeonDbService : INeonDbService
+public partial class NeonDbService : INeonDbService
 {
     internal const int MaxDepth = 3;
     internal const int OrderStep = 1024;
@@ -174,6 +179,10 @@ public class NeonDbService : INeonDbService
         string addFkSql2 = @"do $$ begin if not exists (select 1 from pg_constraint where conname = 'fk_items_completed_by_user_id') then alter table items add constraint fk_items_completed_by_user_id foreign key(completed_by_user_id) references users(id) on update cascade on delete restrict; end if; end $$;";
         await using (var addFk2 = new NpgsqlCommand(addFkSql2, conn)) { await addFk2.ExecuteNonQueryAsync(ct); }
 
+        // Logging table
+        await using (var createLogs = new NpgsqlCommand(@"create table if not exists app_logs ( id serial primary key, occurred_at timestamptz not null default now(), level text not null, event_type text not null, message text not null, user_id int null references users(id) on delete set null, list_id int null references lists(id) on delete cascade, item_id int null references items(id) on delete cascade, data jsonb null ); create index if not exists ix_app_logs_event on app_logs(event_type, occurred_at desc);", conn))
+        { await createLogs.ExecuteNonQueryAsync(ct); }
+
         _schemaEnsured = true;
     }
 
@@ -188,47 +197,75 @@ public class NeonDbService : INeonDbService
 
     public async Task<bool> RegisterUserAsync(string username, string password, string email, string firstName, string lastName, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password) || password.Length < 6) return false;
-        if (string.IsNullOrWhiteSpace(email) || !Regex.IsMatch(email, @"^[^@\s]+@[^@\s]+\.[^@\s]+$")) return false;
-        if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName)) return false;
-        await EnsureSchemaAsync(ct);
-        await using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using (var check = new NpgsqlCommand("select 1 from users where lower(username)=lower(@u) or lower(email)=lower(@e)", conn))
+        try
         {
-            check.Parameters.AddWithValue("u", username);
-            check.Parameters.AddWithValue("e", email);
-            if (await check.ExecuteScalarAsync(ct) != null) return false;
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password) || password.Length < 6)
+            { await LogAsync("Warning", "RegistrationFailed", "Invalid username or password complexity", null, null, null, new { Username = username }, ct); return false; }
+            if (string.IsNullOrWhiteSpace(email) || !Regex.IsMatch(email, @"^[^@\s]+@[^@\s]+\.[^@\s]+$"))
+            { await LogAsync("Warning", "RegistrationFailed", "Invalid email format", null, null, null, new { Username = username, Email = email }, ct); return false; }
+            if (string.IsNullOrWhiteSpace(firstName) || string.IsNullOrWhiteSpace(lastName))
+            { await LogAsync("Warning", "RegistrationFailed", "Missing first or last name", null, null, null, new { Username = username }, ct); return false; }
+            await EnsureSchemaAsync(ct);
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
+            await using (var check = new NpgsqlCommand("select 1 from users where lower(username)=lower(@u) or lower(email)=lower(@e)", conn))
+            {
+                check.Parameters.AddWithValue("u", username);
+                check.Parameters.AddWithValue("e", email);
+                if (await check.ExecuteScalarAsync(ct) != null)
+                { await LogAsync("Warning", "RegistrationFailed", "Username or email already exists", null, null, null, new { Username = username, Email = email }, ct); return false; }
+            }
+            var salt = GenerateSalt(16);
+            var hash = HashPassword(password, salt, 100_000);
+            int newUserId;
+            await using (var ins = new NpgsqlCommand("insert into users(username,email,first_name,last_name,password_hash,password_salt) values(@u,@e,@f,@l,@h,@s) returning id", conn))
+            {
+                ins.Parameters.AddWithValue("u", username);
+                ins.Parameters.AddWithValue("e", email);
+                ins.Parameters.AddWithValue("f", firstName);
+                ins.Parameters.AddWithValue("l", lastName);
+                ins.Parameters.AddWithValue("h", hash);
+                ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt));
+                newUserId = (int)await ins.ExecuteScalarAsync(ct);
+            }
+            await LogAsync("Info", "UserRegistered", $"User '{username}' registered", newUserId, null, null, new { Email = email }, ct);
+            return true;
         }
-        var salt = GenerateSalt(16);
-        var hash = HashPassword(password, salt, 100_000);
-        await using (var ins = new NpgsqlCommand("insert into users(username,email,first_name,last_name,password_hash,password_salt) values(@u,@e,@f,@l,@h,@s)", conn))
+        catch (Exception ex)
         {
-            ins.Parameters.AddWithValue("u", username);
-            ins.Parameters.AddWithValue("e", email);
-            ins.Parameters.AddWithValue("f", firstName);
-            ins.Parameters.AddWithValue("l", lastName);
-            ins.Parameters.AddWithValue("h", hash);
-            ins.Parameters.AddWithValue("s", Convert.ToBase64String(salt));
-            await ins.ExecuteNonQueryAsync(ct);
+            await LogAsync("Error", "RegistrationException", ex.Message, null, null, null, new { Username = username, Email = email, ex.StackTrace }, ct);
+            return false;
         }
-        return true;
     }
 
     public async Task<bool> AuthenticateUserAsync(string username, string password, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password)) return false;
-        await EnsureSchemaAsync(ct);
-        await using var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("select password_hash,password_salt from users where username=@u", conn);
-        cmd.Parameters.AddWithValue("u", username);
-        await using var r = await cmd.ExecuteReaderAsync(ct);
-        if (!await r.ReadAsync(ct)) return false;
-        var storedHash = r.GetString(0);
-        var salt = Convert.FromBase64String(r.GetString(1));
-        var computed = HashPassword(password, salt, ExtractIterations(storedHash));
-        return ConstantTimeEquals(storedHash, computed);
+        try
+        {
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+            { await LogAsync("Warning", "LoginFailed", "Missing credentials", null, null, null, new { Username = username }, ct); return false; }
+            await EnsureSchemaAsync(ct);
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand("select id,password_hash,password_salt from users where username=@u", conn);
+            cmd.Parameters.AddWithValue("u", username);
+            int? userId = null;
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct))
+            { await LogAsync("Warning", "LoginFailed", "User not found", null, null, null, new { Username = username }, ct); return false; }
+            userId = r.GetInt32(0);
+            var storedHash = r.GetString(1);
+            var salt = Convert.FromBase64String(r.GetString(2));
+            var computed = HashPassword(password, salt, ExtractIterations(storedHash));
+            var ok = ConstantTimeEquals(storedHash, computed);
+            await LogAsync(ok ? "Info" : "Warning", ok ? "LoginSucceeded" : "LoginFailed", ok ? "Login successful" : "Invalid password", userId, null, null, new { Username = username }, ct);
+            return ok;
+        }
+        catch (Exception ex)
+        {
+            await LogAsync("Error", "LoginException", ex.Message, null, null, null, new { Username = username, ex.StackTrace }, ct);
+            return false;
+        }
     }
 
     public async Task<int?> GetUserIdAsync(string username, CancellationToken ct = default)
@@ -315,6 +352,7 @@ public class NeonDbService : INeonDbService
             }
             await tx.CommitAsync(ct);
         }
+        await LogAsync("Info", "ListCreated", $"List {newId} created", userId, newId, null, new { Name = name, IsDaily = isDaily }, ct);
         return newId;
     }
 
@@ -351,6 +389,7 @@ public class NeonDbService : INeonDbService
             }
             await tx.CommitAsync(ct);
         }
+        await LogAsync("Info", "ItemCreated", $"Item {newId} created", null, listId, newId, new { Name = name }, ct);
         return newId;
     }
 
@@ -376,6 +415,7 @@ public class NeonDbService : INeonDbService
             await IncrementRevisionAsync(conn, listId, tx, ct);
             await tx.CommitAsync(ct);
         }
+        await LogAsync("Info", "ItemCreated", $"Item {newId} created", null, listId, newId, new { Name = name }, ct);
         return newId;
     }
 
@@ -543,7 +583,7 @@ public class NeonDbService : INeonDbService
             await using (var getUser = new NpgsqlCommand("select username from users where id=@u", conn, tx)) { getUser.Parameters.AddWithValue("u", userId); var uObj = await getUser.ExecuteScalarAsync(ct); username = uObj as string ?? string.Empty; }
         }
         await tx.CommitAsync(ct);
-        var membership = new MembershipRecord(membershipId!.Value, listId, userId, username, role, joined, false, viaCodeExisting ?? code);
+        var membership = new MembershipRecord(membershipId!.Value, listId, userId, username, role, joined, false, viaCodeExisting ?? code); // fixed missing userId param
         var listRecord = new ListRecord(listId, listName, isDaily);
         return (true, listId, listRecord, membership);
     }
@@ -678,29 +718,71 @@ public class NeonDbService : INeonDbService
             var cur = parentId; while (cur != null) { await using (var updAnc = new NpgsqlCommand("update items set is_completed=false,completed_by_user_id=null where id=@p", conn, tx)) { updAnc.Parameters.AddWithValue("p", cur.Value); await updAnc.ExecuteNonQueryAsync(ct); } int? nextParent = null; await using (var getp = new NpgsqlCommand("select parent_item_id from items where id=@p", conn, tx)) { getp.Parameters.AddWithValue("p", cur.Value); var res = await getp.ExecuteScalarAsync(ct); nextParent = res is int ip ? (int?)ip : null; } cur = nextParent; }
         }
         await using (var bump = new NpgsqlCommand("update lists set revision=revision+1 where id=@l", conn, tx)) { bump.Parameters.AddWithValue("l", listId); await bump.ExecuteNonQueryAsync(ct); }
-        await tx.CommitAsync(ct); return true;
+        await tx.CommitAsync(ct);
+        await LogAsync("Info", completed ? "ItemCompleted" : "ItemUncompleted", $"Item {itemId} completion set to {completed}", userId == 0 ? null : userId, listId, itemId, null, ct);
+        return true;
     }
 
-    private static string? TryGetFromSecureStorage()
-    { try { return SecureStorage.GetAsync("NEON_CONNECTION_STRING").GetAwaiter().GetResult(); } catch { return null; } }
+    // Logging implementation
+    public async Task<int> LogAsync(string level, string eventType, string message, int? userId = null, int? listId = null, int? itemId = null, object? data = null, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        string? dataJson = null;
+        if (data != null)
+        {
+            try { dataJson = JsonSerializer.Serialize(data); } catch { dataJson = null; }
+        }
+        await using var cmd = new NpgsqlCommand("insert into app_logs(level,event_type,message,user_id,list_id,item_id,data) values(@lvl,@evt,@msg,@uid,@lid,@iid,cast(@data as jsonb)) returning id", conn);
+        cmd.Parameters.AddWithValue("lvl", level ?? "Info");
+        cmd.Parameters.AddWithValue("evt", eventType ?? "General");
+        cmd.Parameters.AddWithValue("msg", message ?? string.Empty);
+        cmd.Parameters.AddWithValue("uid", (object?)userId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("lid", (object?)listId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("iid", (object?)itemId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("data", (object?)dataJson ?? DBNull.Value);
+        var idObj = await cmd.ExecuteScalarAsync(ct);
+        return idObj is int id ? id : 0;
+    }
 
-    // Password & security helpers
-    private static byte[] GenerateSalt(int size)
-    { var salt = new byte[size]; RandomNumberGenerator.Fill(salt); return salt; }
+    public async Task<IReadOnlyList<LogRecord>> GetLogsAsync(int? userId = null, string? level = null, string? eventType = null, DateTime? sinceUtc = null, int limit = 100, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var conditions = new List<string>();
+        if (userId != null) conditions.Add("user_id=@uid");
+        if (!string.IsNullOrWhiteSpace(level)) conditions.Add("level=@lvl");
+        if (!string.IsNullOrWhiteSpace(eventType)) conditions.Add("event_type=@evt");
+        if (sinceUtc != null) conditions.Add("occurred_at>=@since");
+        var where = conditions.Count > 0 ? "where " + string.Join(" and ", conditions) : string.Empty;
+        var sql = $"select id, occurred_at, level, event_type, message, user_id, list_id, item_id, data from app_logs {where} order by occurred_at desc limit @limit";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("limit", limit);
+        if (userId != null) cmd.Parameters.AddWithValue("uid", userId.Value);
+        if (!string.IsNullOrWhiteSpace(level)) cmd.Parameters.AddWithValue("lvl", level);
+        if (!string.IsNullOrWhiteSpace(eventType)) cmd.Parameters.AddWithValue("evt", eventType);
+        if (sinceUtc != null) cmd.Parameters.AddWithValue("since", sinceUtc.Value);
+        var list = new List<LogRecord>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            list.Add(new LogRecord(
+                r.GetInt32(0),
+                r.GetDateTime(1),
+                r.GetString(2),
+                r.GetString(3),
+                r.GetString(4),
+                r.IsDBNull(5) ? null : r.GetInt32(5),
+                r.IsDBNull(6) ? null : r.GetInt32(6),
+                r.IsDBNull(7) ? null : r.GetInt32(7),
+                r.IsDBNull(8) ? null : r.GetString(8)));
+        }
+        return list;
+    }
 
-    private static string HashPassword(string password, byte[] salt, int iterations)
-    { using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256); var hash = pbkdf2.GetBytes(32); return $"{iterations}:{Convert.ToBase64String(salt)}:{Convert.ToBase64String(hash)}"; }
-
-    private static int ExtractIterations(string stored)
-    { try { var parts = stored.Split(':'); if (parts.Length >= 3 && int.TryParse(parts[0], out var it)) return it; } catch { } return 100_000; }
-
-    private static bool ConstantTimeEquals(string a, string b)
-    { var ba = System.Text.Encoding.UTF8.GetBytes(a); var bb = System.Text.Encoding.UTF8.GetBytes(b); if (ba.Length != bb.Length) return false; int diff = 0; for (int i = 0; i < ba.Length; i++) diff |= ba[i] ^ bb[i]; return diff == 0; }
-
-    private static string GenerateShareCode()
-    { const string alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; Span<byte> bytes = stackalloc byte[8]; RandomNumberGenerator.Fill(bytes); var sb = new System.Text.StringBuilder(8); for (int i=0;i<8;i++) sb.Append(alphabet[bytes[i]%alphabet.Length]); return sb.ToString(); }
-
-    // Implement missing interface methods for UI state & prefs
+    // === UI State & Preferences (restored) ===
     public async Task<bool> GetItemExpandedAsync(int userId, int itemId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("select expanded from item_ui_state where user_id=@u and item_id=@i", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("i", itemId); var res = await cmd.ExecuteScalarAsync(ct); return res is bool b ? b : true; }
 
@@ -715,4 +797,23 @@ public class NeonDbService : INeonDbService
 
     public async Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("insert into user_list_prefs(user_id,list_id,hide_completed,updated_at) values(@u,@l,@h,now()) on conflict(user_id,list_id) do update set hide_completed=excluded.hide_completed, updated_at=now()", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); cmd.Parameters.AddWithValue("h", hideCompleted); await cmd.ExecuteNonQueryAsync(ct); }
+
+    // === Security & Utility Helpers (restored) ===
+    private static byte[] GenerateSalt(int size)
+    { var salt = new byte[size]; RandomNumberGenerator.Fill(salt); return salt; }
+
+    private static string HashPassword(string password, byte[] salt, int iterations)
+    { using var pbkdf2 = new Rfc2898DeriveBytes(password, salt, iterations, HashAlgorithmName.SHA256); var hash = pbkdf2.GetBytes(32); return $"{iterations}:{Convert.ToBase64String(salt)}:{Convert.ToBase64String(hash)}"; }
+
+    private static int ExtractIterations(string stored)
+    { try { var parts = stored.Split(':'); if (parts.Length >= 3 && int.TryParse(parts[0], out var it)) return it; } catch { } return 100_000; }
+
+    private static bool ConstantTimeEquals(string a, string b)
+    { var ba = Encoding.UTF8.GetBytes(a); var bb = Encoding.UTF8.GetBytes(b); if (ba.Length != bb.Length) return false; int diff = 0; for (int i = 0; i < ba.Length; i++) diff |= ba[i] ^ bb[i]; return diff == 0; }
+
+    private static string GenerateShareCode()
+    { const string alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; Span<byte> bytes = stackalloc byte[8]; RandomNumberGenerator.Fill(bytes); var sb = new StringBuilder(8); for (int i=0;i<8;i++) sb.Append(alphabet[bytes[i]%alphabet.Length]); return sb.ToString(); }
+
+    private static string? TryGetFromSecureStorage()
+    { try { return SecureStorage.GetAsync("NEON_CONNECTION_STRING").GetAwaiter().GetResult(); } catch { return null; } }
 }
