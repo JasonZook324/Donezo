@@ -1,5 +1,6 @@
 using Microsoft.Maui.Controls;
 using Microsoft.Maui.Controls.Shapes;
+using Microsoft.Maui.Layouts;
 
 namespace Donezo.Pages.Components;
 
@@ -26,6 +27,8 @@ public class DualHeaderView : ContentView
     public event EventHandler? DashboardRequested;
     public event EventHandler? ManageAccountRequested;
     public event EventHandler? ManageListsRequested;
+    // New: request page to toggle user menu overlay
+    public event EventHandler? UserMenuToggleRequested;
 
     private readonly Label _appTitleLabel;
     private readonly Label _taglineLabel;
@@ -33,10 +36,9 @@ public class DualHeaderView : ContentView
     private readonly ThemeToggleView _toggle;
     private readonly Grid _root;
     private readonly Grid _userIconGrid;
-    private readonly Border _menuBorder;
+
+    // NOTE: Internal dropdown menu removed from layout; page will host overlay menu.
     private readonly VerticalStackLayout _menuStack;
-    private readonly TapGestureRecognizer _iconTap;
-    private bool _menuVisible;
     private readonly Label _usernameMenuLabel;
 
     public DualHeaderView()
@@ -51,12 +53,12 @@ public class DualHeaderView : ContentView
 
         // User icon (head + shoulders)
         _userIconGrid = BuildUserIcon();
-        _iconTap = new TapGestureRecognizer();
-        _iconTap.Tapped += (_, _) => ToggleMenu();
-        _userIconGrid.GestureRecognizers.Add(_iconTap);
+        var iconTap = new TapGestureRecognizer();
+        iconTap.Tapped += (_, _) => ToggleMenu();
+        _userIconGrid.GestureRecognizers.Add(iconTap);
         SemanticProperties.SetDescription(_userIconGrid, "Open user menu");
 
-        // Menu content
+        // Menu content model (used by page overlay)
         _usernameMenuLabel = new Label { FontAttributes = FontAttributes.Bold, TextColor = Colors.White, FontSize = 14 };
         _menuStack = new VerticalStackLayout { Spacing = 6 };
         _menuStack.Children.Add(_usernameMenuLabel);
@@ -66,20 +68,6 @@ public class DualHeaderView : ContentView
         _menuStack.Children.Add(BuildMenuItem("Manage Lists", () => ManageListsRequested?.Invoke(this, EventArgs.Empty)));
         _menuStack.Children.Add(new BoxView { HeightRequest = 1, HorizontalOptions = LayoutOptions.Fill, BackgroundColor = Colors.White.WithAlpha(0.25f) });
         _menuStack.Children.Add(BuildMenuItem("Logout", () => LogoutRequested?.Invoke(this, EventArgs.Empty), isDestructive:true));
-
-        _menuBorder = new Border
-        {
-            StrokeThickness = 1,
-            Stroke = Colors.White.WithAlpha(0.35f),
-            BackgroundColor = primary.WithAlpha(0.90f),
-            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) },
-            Padding = new Thickness(14, 12),
-            Content = _menuStack,
-            TranslationY = 4,
-            Opacity = 0,
-            IsVisible = false,
-            Shadow = new Shadow { Brush = Brush.Black, Offset = new Point(0,4), Radius = 12, Opacity = 0.35f }
-        };
 
         // Logo (circle + check)
         var logoSize = 42d;
@@ -136,23 +124,18 @@ public class DualHeaderView : ContentView
         _root.Add(rightStack, 2, 0);
         Grid.SetColumn(_pageTitleLabel, 0); Grid.SetColumnSpan(_pageTitleLabel, 3); _root.Add(_pageTitleLabel);
 
-        // Absolute overlay for menu
-        var overlay = new Grid();
-        overlay.Children.Add(_root);
-        // Position menu near icon (end alignment)
-        var menuContainer = new Grid { HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Start, Margin = new Thickness(0, 60, 6, 0) };
-        menuContainer.Children.Add(_menuBorder);
-        overlay.Children.Add(menuContainer);
-        Content = overlay;
-        // Ensure initial username state hides icon when not logged in
+        Content = _root;
         UpdateUsername();
     }
+
+    // Expose menu items stack so page can host it inside its own overlay
+    public VerticalStackLayout GetMenuContentStack() => _menuStack;
 
     private View BuildMenuItem(string text, Action action, bool isDestructive = false)
     {
         var lbl = new Label { Text = text, TextColor = isDestructive ? Colors.OrangeRed : Colors.White, FontSize = 14 };
         var tap = new TapGestureRecognizer();
-        tap.Tapped += async (_, _) => { HideMenu(); action(); };
+        tap.Tapped += (_, _) => action();
         lbl.GestureRecognizers.Add(tap);
         return lbl;
     }
@@ -190,23 +173,9 @@ public class DualHeaderView : ContentView
 
     private void ToggleMenu()
     {
-        // Guard: only allow menu if a user is logged in
         if (string.IsNullOrWhiteSpace(Username)) return;
-        if (_menuVisible) { HideMenu(); return; }
-        ShowMenu();
-    }
-    private async void ShowMenu()
-    {
-        _menuVisible = true;
-        _menuBorder.IsVisible = true;
-        _menuBorder.Opacity = 0; _menuBorder.Scale = 0.85;
-        await Task.WhenAll(_menuBorder.FadeTo(1, 160, Easing.CubicOut), _menuBorder.ScaleTo(1, 160, Easing.CubicOut));
-    }
-    private async void HideMenu()
-    {
-        _menuVisible = false;
-        await Task.WhenAll(_menuBorder.FadeTo(0, 120, Easing.CubicOut), _menuBorder.ScaleTo(0.92, 120, Easing.CubicOut));
-        _menuBorder.IsVisible = false;
+        // Delegate to page overlay instead of internal dropdown
+        UserMenuToggleRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private void UpdatePageTitle() => _pageTitleLabel.Text = TitleText;
@@ -215,17 +184,12 @@ public class DualHeaderView : ContentView
     {
         var hasUser = !string.IsNullOrWhiteSpace(Username);
         _usernameMenuLabel.Text = hasUser ? Username : string.Empty;
-        _userIconGrid.IsVisible = hasUser; // hide icon when not logged in
-        if (!hasUser && _menuVisible) HideMenu();
+        _userIconGrid.IsVisible = hasUser;
     }
 
     private void OnRequestedThemeChanged(object? sender, AppThemeChangedEventArgs e)
     {
         _toggle.SetState(e.RequestedTheme == AppTheme.Dark, suppressEvent:true, animate:true);
-        if (Application.Current != null)
-        {
-            var primary = (Color)Application.Current.Resources["Primary"]; _menuBorder.BackgroundColor = primary.WithAlpha(0.90f);
-        }
     }
 
     protected override void OnParentChanged()

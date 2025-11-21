@@ -7,6 +7,7 @@ using Microsoft.Maui.Controls.Shapes; // RoundRectangle
 using System.Collections.Generic;
 using System.ComponentModel; // for PropertyChangedEventHandler
 using Donezo.Pages.Components; // already present
+using Microsoft.Maui.Layouts; // AbsoluteLayoutFlags
 
 namespace Donezo.Pages;
 
@@ -202,6 +203,14 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private Switch _hideCompletedSwitch = null!; // now built inside items panel
     private Picker _listPicker = null!; // list selection dropdown
 
+    // Page overlay for user menu
+    private Grid _pageRoot = null!; // 2-row grid (header, content)
+    private AbsoluteLayout _pageOverlay = null!; // overlay root
+    private Grid _menuAlignGrid = null!; // alignment grid for menu (right aligned)
+    private Border _userMenuBorder = null!; // dropdown container
+    private BoxView _menuScrim = null!; // captures outside taps
+    private bool _userMenuVisible;
+
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
 
@@ -293,10 +302,105 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _dualHeader.DashboardRequested += (_, __) => { /* already on dashboard */ };
         _dualHeader.ManageAccountRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//manageaccount"); } catch { } };
         _dualHeader.ManageListsRequested += async (_, __) => { try { await Shell.Current.GoToAsync("//managelists?username=" + Uri.EscapeDataString(_username)); } catch { } };
+        _dualHeader.UserMenuToggleRequested += (_, __) => ToggleUserMenu();
         _dualHeader.SetTheme(Application.Current!.RequestedTheme == AppTheme.Dark, suppressEvent:true);
-        var root = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
-        root.Add(_dualHeader,0,0); root.Add(new ScrollView { Content = contentStack },0,1);
-        Content = root;
+
+        // Root layout
+        _pageRoot = new Grid { RowDefinitions = new RowDefinitionCollection { new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star) } };
+        _pageRoot.Add(_dualHeader,0,0); _pageRoot.Add(new ScrollView { Content = contentStack },0,1);
+
+        // Overlay root
+        _pageOverlay = new AbsoluteLayout { IsClippedToBounds = false };
+        AbsoluteLayout.SetLayoutBounds(_pageRoot, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_pageRoot, AbsoluteLayoutFlags.All);
+
+        // Build scrim to catch outside taps
+        _menuScrim = new BoxView { BackgroundColor = Colors.Transparent, IsVisible = false, InputTransparent = true };
+        var scrimTap = new TapGestureRecognizer();
+        scrimTap.Tapped += async (_, __) => await HideUserMenuAsync();
+        _menuScrim.GestureRecognizers.Add(scrimTap);
+        AbsoluteLayout.SetLayoutBounds(_menuScrim, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_menuScrim, AbsoluteLayoutFlags.All);
+
+        // Build user menu dropdown reusing menu content from header
+        var primary = (Color)Application.Current!.Resources["Primary"];
+        var menuContent = _dualHeader.GetMenuContentStack();
+        _userMenuBorder = new Border
+        {
+            StrokeThickness = 1,
+            Stroke = Colors.White.WithAlpha(0.35f),
+            BackgroundColor = primary.WithAlpha(0.90f),
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(10) },
+            Padding = new Thickness(14, 12),
+            Content = menuContent,
+            TranslationY = 60, // drop below header
+            Opacity = 0,
+            IsVisible = false,
+            Shadow = new Shadow { Brush = Brush.Black, Offset = new Point(0,4), Radius = 12, Opacity = 0.35f },
+            HorizontalOptions = LayoutOptions.End,
+            VerticalOptions = LayoutOptions.Start
+        };
+
+        // Right align: a 2-col grid inside overlay (Star, Auto)
+        _menuAlignGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitionCollection
+            {
+                new ColumnDefinition(GridLength.Star),
+                new ColumnDefinition(GridLength.Auto)
+            },
+            Margin = new Thickness(0,0,6,0),
+            InputTransparent = true,
+            IsVisible = false
+        };
+        Grid.SetColumn(_userMenuBorder, 1);
+        _menuAlignGrid.Children.Add(_userMenuBorder);
+
+        AbsoluteLayout.SetLayoutBounds(_menuAlignGrid, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_menuAlignGrid, AbsoluteLayoutFlags.All);
+
+        // Add children (order defines z-index): content, scrim, menu
+        _pageOverlay.Children.Add(_pageRoot); // base content
+        _pageOverlay.Children.Add(_menuScrim); // invisible click-catcher
+        _pageOverlay.Children.Add(_menuAlignGrid); // overlay dropdown
+
+        Content = _pageOverlay;
+    }
+
+    private async void ToggleUserMenu()
+    {
+        if (string.IsNullOrWhiteSpace(_dualHeader?.Username)) return; // guard by displayed header user
+        if (_userMenuVisible)
+        {
+            await HideUserMenuAsync();
+        }
+        else
+        {
+            await ShowUserMenuAsync();
+        }
+    }
+
+    private async Task ShowUserMenuAsync()
+    {
+        _userMenuVisible = true;
+        _menuScrim.IsVisible = true;
+        _menuScrim.InputTransparent = false;
+        _menuAlignGrid.IsVisible = true;
+        _menuAlignGrid.InputTransparent = false; // allow interaction with menu
+        _userMenuBorder.Scale = 0.85;
+        _userMenuBorder.IsVisible = true;
+        await Task.WhenAll(_userMenuBorder.FadeTo(1, 160, Easing.CubicOut), _userMenuBorder.ScaleTo(1, 160, Easing.CubicOut));
+    }
+
+    private async Task HideUserMenuAsync()
+    {
+        _userMenuVisible = false;
+        await Task.WhenAll(_userMenuBorder.FadeTo(0, 120, Easing.CubicOut), _userMenuBorder.ScaleTo(0.92, 120, Easing.CubicOut));
+        _userMenuBorder.IsVisible = false;
+        _menuAlignGrid.InputTransparent = true; // stop blocking touches
+        _menuAlignGrid.IsVisible = false;
+        _menuScrim.InputTransparent = true;
+        _menuScrim.IsVisible = false;
     }
 
     private async Task RefreshListsPickerAsync()
