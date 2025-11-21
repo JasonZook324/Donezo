@@ -289,6 +289,8 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private void BuildUi()
     {
         _listPicker = new Picker { Title = "Select List" };
+        // Ensure picker displays list names instead of record type names for both owned and shared list records.
+        _listPicker.ItemDisplayBinding = new Binding("Name");
         _listPicker.SelectedIndexChanged += async (s,e)=>
         {
             if (_listPicker.SelectedItem is ListRecord lr) { _selectedListId = lr.Id; await RefreshItemsAsync(userInitiated:true); }
@@ -416,6 +418,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         foreach (var lr in ownedRaw)
         { try { var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id); if (ownerId == _userId) actuallyOwned.Add(lr); } catch { } }
         var shared = await _db.GetSharedListsAsync(_userId.Value);
+
+        // UPDATE: persist lists for role checks (was missing, causing all roles to appear as Viewer)
+        _ownedLists = actuallyOwned; // role: Owner by definition
+        _sharedLists = shared;      // roles from membership records
+
         // Combine into single object list for picker
         var combined = new List<object>(); combined.AddRange(actuallyOwned); combined.AddRange(shared);
         _listPicker.ItemsSource = combined;
