@@ -356,6 +356,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         Grid.SetColumn(_userMenuBorder, 1);
         _menuAlignGrid.Children.Add(_userMenuBorder);
 
+        // NEW: allow tapping anywhere outside the border (inside alignment grid) to close menu
+        var outsideTap = new TapGestureRecognizer();
+        outsideTap.Tapped += async (_, __) => { if (_userMenuVisible) await HideUserMenuAsync(); };
+        _menuAlignGrid.GestureRecognizers.Add(outsideTap);
+
         AbsoluteLayout.SetLayoutBounds(_menuAlignGrid, new Rect(0,0,1,1));
         AbsoluteLayout.SetLayoutFlags(_menuAlignGrid, AbsoluteLayoutFlags.All);
 
@@ -386,7 +391,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _menuScrim.IsVisible = true;
         _menuScrim.InputTransparent = false;
         _menuAlignGrid.IsVisible = true;
-        _menuAlignGrid.InputTransparent = false; // allow interaction with menu
+        _menuAlignGrid.InputTransparent = false; // allow interaction with menu & outside tap on grid
         _userMenuBorder.Scale = 0.85;
         _userMenuBorder.IsVisible = true;
         await Task.WhenAll(_userMenuBorder.FadeTo(1, 160, Easing.CubicOut), _userMenuBorder.ScaleTo(1, 160, Easing.CubicOut));
