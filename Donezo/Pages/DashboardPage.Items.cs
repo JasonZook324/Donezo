@@ -58,14 +58,6 @@ public partial class DashboardPage
     {
         _emptyFilteredLabel ??= new Label { IsVisible=false, TextColor=Colors.Gray, FontSize=12 };
         _statsLabel ??= new Label { FontSize=12, TextColor=(Color)Application.Current!.Resources[Application.Current!.RequestedTheme==AppTheme.Dark?"Gray300":"Gray600"], HorizontalTextAlignment=TextAlignment.End };
-        _newItemEntry = new Entry { Placeholder="New item name", Style=(Style)Application.Current!.Resources["FilledEntry"] };
-        _newItemEntry.TextChanged += (_,__) => { if (_addItemButton!=null) _addItemButton.IsEnabled = CanAddItems() && !string.IsNullOrWhiteSpace(_newItemEntry.Text); };
-        _addItemButton = new Button { Text="Add", Style=(Style)Application.Current!.Resources["PrimaryButton"], IsEnabled=false };
-        _addItemButton.Clicked += async (_,__) => { if (!CanAddItems()) { await ShowViewerBlockedAsync("adding items"); return; } await AddItemAsync(); };
-        _newChildEntry = new Entry { Placeholder="New child name", Style=(Style)Application.Current!.Resources["FilledEntry"], IsVisible=false };
-        _newChildEntry.TextChanged += (_,__) => UpdateChildControls();
-        _addChildButton = new Button { Text="Add Child", Style=(Style)Application.Current!.Resources["PrimaryButton"], IsEnabled=false, IsVisible=false };
-        _addChildButton.Clicked += async (_,__) => { if (!CanAddItems()) { await ShowViewerBlockedAsync("adding child items"); return; } await AddChildItemAsync(); };
         _itemViewTemplate = CreateItemTemplate();
         _itemsView = new CollectionView { ItemsSource=_items, SelectionMode=SelectionMode.None, ItemTemplate=_itemViewTemplate, ItemsUpdatingScrollMode=ItemsUpdatingScrollMode.KeepScrollOffset };
         _moveUpButton = new Button { Text="Move Up", Style=(Style)Application.Current!.Resources["OutlinedButton"], FontSize=12, IsEnabled=false };
@@ -80,7 +72,10 @@ public partial class DashboardPage
         header.Add(new Label { Text="Items", Style=(Style)Application.Current!.Resources["SectionTitle"], VerticalTextAlignment=TextAlignment.Center },0,0);
         header.Add(_statsLabel,1,0); header.Add(_moveUpButton,2,0); header.Add(_moveDownButton,3,0); header.Add(_resetSubtreeButton,4,0);
         var filterRow = new HorizontalStackLayout { Spacing=8, Children={ new Label { Text="Hide Completed" }, _hideCompletedSwitch } };
-        var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) }, Padding = new Thickness(6,0,4,0), Content = new VerticalStackLayout { Spacing=12, Padding=16, Children = { header, filterRow, _emptyFilteredLabel, _itemsView, new HorizontalStackLayout { Spacing=8, Children={ _newItemEntry, _addItemButton } }, new HorizontalStackLayout { Spacing=8, Children={ _newChildEntry, _addChildButton } } } } };
+        _openNewItemButton = new Button { Text = "+ New Item", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _openNewItemButton.Clicked += (_,__) => ShowNewItemOverlay();
+        var newButtonRow = new HorizontalStackLayout { Children = { _openNewItemButton }, HorizontalOptions = LayoutOptions.Start };
+        var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) }, Padding = new Thickness(6,0,4,0), Content = new VerticalStackLayout { Spacing=12, Padding=16, Children = { newButtonRow, header, filterRow, _emptyFilteredLabel, _itemsView } } };
         card.Style = (Style)Application.Current!.Resources["CardBorder"]; return card;
     }
 
@@ -90,17 +85,19 @@ public partial class DashboardPage
         {
             var card = new Border { StrokeThickness=1, StrokeShape=new RoundRectangle { CornerRadius=new CornerRadius(10)}, Padding=new Thickness(6,0,4,0)};
             card.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelBorderGapConverter()));
-            var grid = new Grid { Padding=new Thickness(4,4), ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
+            var grid = new Grid { Padding=new Thickness(4,4), ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(new GridLength(28)), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
             var badge = new Label { Margin=new Thickness(4,0), VerticalTextAlignment=TextAlignment.Center, FontAttributes=FontAttributes.Bold };
             badge.SetBinding(Label.TextProperty, new Binding(".", converter:new LevelBadgeConverter()));
             badge.SetBinding(Label.TextColorProperty, new Binding(".", converter:new LevelAccentColorConverter())); grid.Add(badge,0,0);
             void OnDragStarting(object? s, DragStartingEventArgs e){ if (!CanDragItems()) return; if (card.BindingContext is ItemVm vm){ _holdCts?.Cancel(); vm.IsPreDrag=false; vm.IsDragging=true; ApplyItemCardStyle(card,vm); _dragItem=vm; _pendingDragVm=vm; try{ e.Data.Properties["ItemId"] = vm.Id;}catch{} } }
             var drag = new DragGestureRecognizer{ CanDrag=true }; drag.DragStarting += OnDragStarting; card.GestureRecognizers.Add(drag);
+            // Always reserve expand column space; hide chevrons when no children instead of collapsing column.
             var expandContainer = new Grid { WidthRequest=28, HeightRequest=28 };
             var chevronRight = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M8 6 L16 12 L8 18") };
-            chevronRight.SetBinding(IsVisibleProperty, new Binding("IsExpanded", converter:new InvertBoolConverter()));
+            chevronRight.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronRightVisibilityConverter() });
             var chevronDown = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M6 9 L12 15 L18 9") };
-            chevronDown.SetBinding(IsVisibleProperty, "IsExpanded"); expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown); expandContainer.SetBinding(IsVisibleProperty, "HasChildren");
+            chevronDown.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronDownVisibilityConverter() });
+            expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown);
             var expandTap = new TapGestureRecognizer(); expandTap.Tapped += async (_,__) => { if (card.BindingContext is ItemVm vm){ if (!vm.HasChildren) return; bool collapsing = vm.IsExpanded; if (collapsing) { CollapseIncremental(vm); if (_selectedItem!=null && IsUnder(vm,_selectedItem)) SetSingleSelection(vm); } else { ExpandIncremental(vm); } _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3); _recentLocalMutationUtc = DateTime.UtcNow; if (_userId!=null) await _db.SetItemExpandedAsync(_userId.Value, vm.Id, vm.IsExpanded); } }; expandContainer.GestureRecognizers.Add(expandTap); grid.Add(expandContainer,1,0);
             var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center }; nameLabel.SetBinding(Label.TextProperty, "Name"); nameLabel.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameLabel.SetBinding(IsVisibleProperty, new Binding("IsRenaming", converter:new InvertBoolConverter()));
             var nameEntry = new Entry { HeightRequest=32, FontSize=14 }; nameEntry.SetBinding(Entry.TextProperty, "EditableName", BindingMode.TwoWay); nameEntry.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameEntry.SetBinding(IsVisibleProperty, "IsRenaming");
@@ -117,6 +114,19 @@ public partial class DashboardPage
             return new VerticalStackLayout { Spacing=0, Children={ card, new BoxView { HeightRequest=4, Opacity=0 } } };
         });
     }
+// Converter classes for multi-binding chevron visibility
+public class ChevronRightVisibilityConverter : IMultiValueConverter
+{
+    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+        => (values.Length==2 && values[0] is bool has && values[1] is bool expanded && has && !expanded);
+    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => Array.Empty<object>();
+}
+public class ChevronDownVisibilityConverter : IMultiValueConverter
+{
+    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+        => (values.Length==2 && values[0] is bool has && values[1] is bool expanded && has && expanded);
+    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => Array.Empty<object>();
+}
 
     // Incremental expand: insert visible descendants after parent without rebuilding whole list
     private void ExpandIncremental(ItemVm parent)
@@ -173,14 +183,44 @@ public partial class DashboardPage
     private void RemoveLocalSubtree(ItemVm root){ if (root==null) return; var remove=new HashSet<int>(); void Collect(ItemVm n){ if(!remove.Add(n.Id)) return; foreach(var c in n.Children) Collect(c);} Collect(root); _allItems.RemoveAll(a=>remove.Contains(a.Id)); foreach(var vm in _allItems) vm.Children.RemoveAll(c=>remove.Contains(c.Id)); }
 
     // CRUD operations (optimistic)
-    private async Task AddItemAsync(){ var listId=_selectedListId; if(listId==null) return; var name=_newItemEntry.Text?.Trim(); if(string.IsNullOrWhiteSpace(name)) return; int newId; try { newId=await _db.AddItemAsync(listId.Value,name); } catch { return; } _newItemEntry.Text=string.Empty; try{ var rec=await _db.GetItemAsync(newId); if(rec!=null){ var vm=CreateVmFromRecord(rec); // compute append order
-                int maxOrder=_allItems.Where(x=>x.ParentId==null).Select(x=>x.Order).DefaultIfEmpty(0).Max();
-                var rev = await _db.GetListRevisionAsync(listId.Value);
-                int desiredOrder = maxOrder + 1000; // large step to keep ordering stable
-                try { var orderRes = await _db.SetItemOrderAsync(vm.Id, desiredOrder, rev); if(orderRes.Ok){ vm.Order = desiredOrder; _lastRevision = orderRes.NewRevision; } } catch { }
-                _allItems.Add(vm); vm.RecalcState(); RebuildVisibleItems(); UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(5);} else { /* fallback full refresh */ await RefreshItemsAsync(true);} } catch{ await RefreshItemsAsync(true);} }
+    private async Task AddItemAsync(){ var listId=_selectedListId; if(listId==null) return; var name=_newItemEntry.Text?.Trim(); if(string.IsNullOrWhiteSpace(name)) return; int newId; try { newId=await _db.AddItemAsync(listId.Value,name); } catch { return; } _newItemEntry.Text=string.Empty; try{ var rec=await _db.GetItemAsync(newId); if(rec!=null){ var vm=CreateVmFromRecord(rec); // DB already assigns max sparse order placing item at bottom
+                _allItems.Add(vm); vm.RecalcState(); RebuildVisibleItems();
+                // If newly added root item appears at top of visible list, update DB order to reflect that position.
+                if (vm.ParentId==null && _items.Count>0 && ReferenceEquals(_items[0], vm))
+                {
+                    // Determine minimum current order among other root items (excluding new one)
+                    var otherRoots = _allItems.Where(r=>r.ParentId==null && r.Id!=vm.Id).ToList();
+                    if (otherRoots.Count>0)
+                    {
+                        var minOrder = otherRoots.Min(r=>r.Order);
+                        if (vm.Order >= minOrder) // move it before the previous first root
+                        {
+                            try {
+                                var expected = await _db.GetListRevisionAsync(listId.Value);
+                                int newOrder = minOrder - 1; // simple step earlier than first
+                                var res = await _db.SetItemOrderAsync(vm.Id,newOrder,expected);
+                                if (res.Ok)
+                                {
+                                    vm.Order = newOrder;
+                                    // Resort in-memory roots and rebuild visible list
+                                    var parent = vm.ParentId==null ? null : _allItems.FirstOrDefault(x=>x.Id==vm.ParentId);
+                                    if (parent==null)
+                                    {
+                                        // resort root children by Order
+                                        foreach(var root in _allItems.Where(r=>r.ParentId==null))
+                                            root.Children.Sort((a,b)=>a.Order.CompareTo(b.Order));
+                                    }
+                                    RebuildVisibleItems();
+                                    _lastRevision = res.NewRevision;
+                                    _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                                }
+                            } catch { /* ignore and keep optimistic ordering */ }
+                        }
+                    }
+                }
+                UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(5);} else { /* fallback full refresh */ await RefreshItemsAsync(true);} } catch{ await RefreshItemsAsync(true);} HideNewItemOverlay(clear:true); }
 
-    private async Task AddChildItemAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; var name=_newChildEntry.Text?.Trim(); if(string.IsNullOrWhiteSpace(name)) return; if(_selectedItem.Level>=3){ await DisplayAlert("Depth Limit","Cannot add a child beyond level 3.","OK"); return;} long expectedRev=await _db.GetListRevisionAsync(listId.Value); try{ int newId=await _db.AddChildItemAsync(listId.Value,name,_selectedItem.Id,expectedRev); _newChildEntry.Text=string.Empty; var rec=await _db.GetItemAsync(newId); if(rec!=null){ var vm=CreateVmFromRecord(rec); _allItems.Add(vm); _selectedItem.Children.Add(vm); _selectedItem.IsExpanded=true; _selectedItem.RecalcState(); vm.RecalcState(); RebuildVisibleItems(); UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} else await RefreshItemsAsync(true);} catch(Exception ex){ await DisplayAlert("Add Child Failed", ex.Message, "OK"); } UpdateChildControls(); }
+    // Child item creation removed per requirement.
     private async Task DeleteItemInlineAsync(ItemVm vm){ var listId=_selectedListId; if(listId==null) return; var expected=await _db.GetListRevisionAsync(listId.Value); var result=await _db.DeleteItemAsync(vm.Id,expected); if(result.Ok){ RemoveLocalSubtree(vm); RebuildVisibleItems(); UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} else await RefreshItemsAsync(true); }
     private async Task MoveSelectedAsync(int delta){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; var siblings=_allItems.Where(x=>x.ParentId==_selectedItem.ParentId).OrderBy(x=>x.Order).ThenBy(x=>x.Id).ToList(); int idx=siblings.FindIndex(x=>x.Id==_selectedItem.Id); if(idx<0) return; int target=idx+delta; if(target<0||target>=siblings.Count) return; int newOrder = delta<0 ? siblings[target].Order-1 : siblings[target].Order+1; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var res=await _db.SetItemOrderAsync(_selectedItem.Id,newOrder,expected); if(!res.Ok){ await RefreshItemsAsync(true); return;} _selectedItem.Order=newOrder; if(_selectedItem.ParentId!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==_selectedItem.ParentId.Value); parent?.Children.Sort((a,b)=>a.Order.CompareTo(b.Order)); } RebuildVisibleItems(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
     private async Task ResetSelectedSubtreeAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var (ok,newRev,affected)=await _db.ResetSubtreeAsync(_selectedItem.Id,expected); if(!ok){ await DisplayAlert("Reset","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return;} void Mark(ItemVm n){ n.IsCompleted=false; n.CompletedAtUtc=null; n.CompletedByUsername=null; foreach(var c in n.Children) Mark(c); n.RecalcState(); } Mark(_selectedItem); RebuildVisibleItems(); UpdateCompletedSummary(); _lastRevision=newRev; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Reset Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} }
@@ -193,21 +233,23 @@ public partial class DashboardPage
     // Refresh items from DB
     private async Task RefreshItemsAsync(bool userInitiated)
     {
-        if (_selectedListId==null){ _items.Clear(); _allItems.Clear(); UpdateCompletedSummary(); UpdateChildControls(); return; }
+        if (_selectedListId==null){ _items.Clear(); _allItems.Clear(); UpdateCompletedSummary(); return; }
         if (_isRefreshing) return; _isRefreshing=true; _suppressListRevisionCheck=true;
         try
         {
             IReadOnlyList<ItemRecord>? records = null; try { records = await _db.GetItemsAsync(_selectedListId.Value); } catch { }
             if (records==null){ // do NOT clear existing items on transient failure
-                UpdateChildControls(); return; }
+                return; }
             _allItems.Clear();
             foreach(var r in records){ var vm=CreateVmFromRecord(r); _allItems.Add(vm); }
             var byId=_allItems.ToDictionary(x=>x.Id); foreach(var vm in _allItems){ if(vm.ParentId!=null && byId.TryGetValue(vm.ParentId.Value,out var p)) p.Children.Add(vm); }
             foreach(var vm in _allItems) vm.RecalcState();
             await LoadHideCompletedPreferenceForSelectedListAsync();
             RebuildVisibleItems(); UpdateCompletedSummary();
+            // Set baseline revision after successful full refresh to prevent immediate duplicate polling refresh
+            try { _lastRevision = await _db.GetListRevisionAsync(_selectedListId.Value); } catch { /* ignore */ }
         }
-        finally { _isRefreshing=false; _suppressListRevisionCheck=false; UpdateChildControls(); }
+        finally { _isRefreshing=false; _suppressListRevisionCheck=false; }
     }
 
     private void UpdateCompletedSummary() { UpdateStats(); }

@@ -52,7 +52,15 @@ public class LevelBadgeConverter : IValueConverter
 public class LevelIndentConverter : IValueConverter
 {
     public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
-        => value is int lvl ? new Thickness((lvl - 1) * 16, 0, 0, 0) : new Thickness(0);
+    {
+        if (value is int lvl)
+        {
+            // Treat levels 1 and 2 as same visual indent so newly added root items (level 1) align with existing roots (level 2)
+            int left = lvl <= 2 ? 16 : (lvl - 1) * 16;
+            return new Thickness(left, 0, 0, 0);
+        }
+        return new Thickness(16,0,0,0);
+    }
     public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
 }
 public class LevelBorderGapConverter : IValueConverter
@@ -61,11 +69,10 @@ public class LevelBorderGapConverter : IValueConverter
     {
         if (value is int lvl)
         {
-            var left = (lvl - 1) * 16; if (left < 0) left = 0;
-            // top gap 2 to match existing bottomGap design
+            int left = lvl <= 2 ? 16 : (lvl - 1) * 16;
             return new Thickness(left, 2, 0, 0);
         }
-        return new Thickness(0,2,0,0);
+        return new Thickness(16,2,0,0);
     }
     public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
 }
@@ -211,10 +218,8 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private ObservableCollection<ItemVm> _items = new(); // removed readonly to allow replacement
     private readonly List<ItemVm> _allItems = new();
     private readonly List<Border> _itemCardBorders = new();
-    private Entry _newItemEntry = null!;
-    private Entry _newChildEntry = null!;
-    private Button _addItemButton = null!;
-    private Button _addChildButton = null!;
+    private Entry _newItemEntry = null!; // now lives inside overlay
+    private Button _addItemButton = null!; // inside overlay
     private DataTemplate _itemViewTemplate = null!;
     private CollectionView _itemsView = null!;
     private Button _moveUpButton = null!;
@@ -223,6 +228,12 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private Label _emptyFilteredLabel = null!;
     private Dictionary<int,bool> _expandedStates = new();
     private bool _suppressCompletionEvent;
+
+    // Add missing fields near other item panel fields
+    private Button _openNewItemButton = null!; // trigger button (defined in items card)
+    private DateTime _recentLocalMutationUtc; // track last local mutation for polling suppression
+
+    // Removed child item support (entries/buttons) per requirement.
 
     // List panel fields referenced by item helpers
     private Switch _hideCompletedSwitch = null!; // now built inside items panel
@@ -237,9 +248,13 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private bool _userMenuVisible;
 
     // Search and filter fields
-    private Entry _searchEntry; // search box (items panel)
+    private Entry _searchEntry; // search box (items panel) (unused but retained)
     private Label _statsLabel; // stats label (items panel)
     private string _itemSearchText = string.Empty; // current search text
+
+    // New item overlay fields
+    private Grid _newItemOverlayRoot = null!; // scrim
+    private Border _newItemModal = null!; // modal content
 
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
@@ -280,10 +295,13 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     {
         if (_initialized) return;
         _initialized = true;
-        _userId = await _db.GetUserIdAsync(_username);
-        if (_userId == null) return;
-        await LoadThemePreferenceAsync();
-        await RefreshListsPickerAsync();
+        await RunBusy(async () =>
+        {
+            _userId = await _db.GetUserIdAsync(_username);
+            if (_userId == null) return;
+            await LoadThemePreferenceAsync();
+            await RefreshListsPickerAsync();
+        }, "Initializing dashboard...");
     }
 
     private async Task LoadThemePreferenceAsync()
@@ -332,8 +350,17 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _listPicker = new Picker { Title = "Select List", ItemDisplayBinding = new Binding("Name") };
         _listPicker.SelectedIndexChanged += async (s,e)=>
         {
-            if (_listPicker.SelectedItem is ListRecord lr) { _selectedListId = lr.Id; await RefreshItemsAsync(true); StartRevisionPolling(); }
-            else if (_listPicker.SelectedItem is SharedListRecord sl) { _selectedListId = sl.Id; await RefreshItemsAsync(true); StartRevisionPolling(); }
+            var sel = _listPicker.SelectedItem;
+            if (sel is ListRecord lr)
+            {
+                await RunBusy(async () => { _selectedListId = lr.Id; await RefreshItemsAsync(true); }, "Loading items...");
+                StartRevisionPolling();
+            }
+            else if (sel is SharedListRecord sl)
+            {
+                await RunBusy(async () => { _selectedListId = sl.Id; await RefreshItemsAsync(true); }, "Loading items...");
+                StartRevisionPolling();
+            }
         };
         _itemsCard = BuildItemsCard();
         var contentStack = new VerticalStackLayout { Padding = new Thickness(20,10), Spacing = 16, Children = { _listPicker, _itemsCard } };
@@ -410,12 +437,72 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _pageOverlay.Children.Add(_menuScrim); // invisible click-catcher
         _pageOverlay.Children.Add(_menuAlignGrid); // overlay dropdown
 
+        // Add new-item overlay (initially hidden)
+        _newItemOverlayRoot = new Grid { IsVisible = false, BackgroundColor = Colors.Black.WithAlpha(0.45f) };
+        _newItemModal = BuildNewItemModal();
+        _newItemOverlayRoot.Children.Add(new Grid { VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.Center, Children = { _newItemModal } });
+        var newBackdropTap = new TapGestureRecognizer(); newBackdropTap.Tapped += (_, __) => HideNewItemOverlay(); _newItemOverlayRoot.GestureRecognizers.Add(newBackdropTap);
+        AbsoluteLayout.SetLayoutBounds(_newItemOverlayRoot, new Rect(0,0,1,1));
+        AbsoluteLayout.SetLayoutFlags(_newItemOverlayRoot, AbsoluteLayoutFlags.All);
+        _pageOverlay.Children.Add(_newItemOverlayRoot);
+
         Content = _pageOverlay;
         // Busy overlay last child for z-order
         _busyOverlay = new BusyOverlayView();
         AbsoluteLayout.SetLayoutBounds(_busyOverlay, new Rect(0,0,1,1));
         AbsoluteLayout.SetLayoutFlags(_busyOverlay, AbsoluteLayoutFlags.All);
         _pageOverlay.Children.Add(_busyOverlay);
+    }
+
+    private Border BuildNewItemModal()
+    {
+        _newItemEntry = new Entry { Placeholder = "Item name", Style = (Style)Application.Current!.Resources["FilledEntry"], WidthRequest = 260 };
+        _addItemButton = new Button { Text = "Add", Style = (Style)Application.Current!.Resources["PrimaryButton"], IsEnabled = false };
+        _newItemEntry.TextChanged += (_, __) => _addItemButton.IsEnabled = CanAddItems() && !string.IsNullOrWhiteSpace(_newItemEntry.Text);
+        _addItemButton.Clicked += async (_, __) => { if (!CanAddItems()) { await ShowViewerBlockedAsync("adding items"); return; } await AddItemAsync(); };
+        var cancelButton = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        cancelButton.Clicked += (_, __) => HideNewItemOverlay(clear:true);
+        var modal = new Border
+        {
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(24) },
+            Padding = new Thickness(24, 28),
+            BackgroundColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "OffBlack" : "White"],
+            Content = new VerticalStackLayout
+            {
+                Spacing = 16,
+                WidthRequest = 300,
+                Children =
+                {
+                    new Label { Text = "Add New Item", FontAttributes = FontAttributes.Bold, FontSize = 20, HorizontalTextAlignment = TextAlignment.Center },
+                    _newItemEntry,
+                    new HorizontalStackLayout { Spacing = 10, HorizontalOptions = LayoutOptions.Center, Children = { _addItemButton, cancelButton } }
+                }
+            }
+        };
+        if (Application.Current!.Resources.TryGetValue("CardBorder", out var styleObj) && styleObj is Style style) modal.Style = style;
+        return modal;
+    }
+
+    private void ShowNewItemOverlay()
+    {
+        if (!CanAddItems()) { _ = ShowViewerBlockedAsync("adding items"); return; }
+        _newItemOverlayRoot.IsVisible = true;
+        _newItemEntry.Text = string.Empty;
+        _addItemButton.IsEnabled = false;
+        _newItemModal.Opacity = 0; _newItemModal.Scale = 0.90;
+        _ = _newItemModal.FadeTo(1,160,Easing.CubicOut);
+        _ = _newItemModal.ScaleTo(1,160,Easing.CubicOut);
+        Device.BeginInvokeOnMainThread(() => _newItemEntry.Focus());
+    }
+
+    private void HideNewItemOverlay(bool clear=false)
+    {
+        if (clear) _newItemEntry.Text = string.Empty;
+        if (!_newItemOverlayRoot.IsVisible) return;
+        _ = _newItemModal.FadeTo(0,120,Easing.CubicOut);
+        _ = _newItemModal.ScaleTo(0.92,120,Easing.CubicOut);
+        Device.StartTimer(TimeSpan.FromMilliseconds(130), () => { _newItemOverlayRoot.IsVisible = false; return false; });
     }
 
     private async void ToggleUserMenu()
@@ -457,26 +544,24 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     private async Task RefreshListsPickerAsync()
     {
         if (_userId == null) return;
-        var ownedRaw = await _db.GetOwnedListsAsync(_userId.Value);
-        var actuallyOwned = new List<ListRecord>();
-        foreach (var lr in ownedRaw)
-        { try { var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id); if (ownerId == _userId) actuallyOwned.Add(lr); } catch { } }
-        var shared = await _db.GetSharedListsAsync(_userId.Value);
-
-        // UPDATE: persist lists for role checks (was missing, causing all roles to appear as Viewer)
-        _ownedLists = actuallyOwned; // role: Owner by definition
-        _sharedLists = shared;      // roles from membership records
-
-        // Combine into single object list for picker
-        var combined = new List<object>(); combined.AddRange(actuallyOwned); combined.AddRange(shared);
-        _listPicker.ItemsSource = combined;
-        if (_selectedListId != null)
+        await RunBusy(async () =>
         {
-            var match = combined.FirstOrDefault(o => (o is ListRecord lr && lr.Id == _selectedListId) || (o is SharedListRecord sl && sl.Id == _selectedListId));
-            if (match != null) _listPicker.SelectedItem = match; else _listPicker.SelectedIndex = 0;
-        }
-        else if (combined.Count > 0)
-        { _listPicker.SelectedIndex = 0; }
+            var ownedRaw = await _db.GetOwnedListsAsync(_userId.Value);
+            var actuallyOwned = new List<ListRecord>();
+            foreach (var lr in ownedRaw)
+            { try { var ownerId = await _db.GetListOwnerUserIdAsync(lr.Id); if (ownerId == _userId) actuallyOwned.Add(lr); } catch { } }
+            var shared = await _db.GetSharedListsAsync(_userId.Value);
+            _ownedLists = actuallyOwned; _sharedLists = shared;
+            var combined = new List<object>(); combined.AddRange(actuallyOwned); combined.AddRange(shared);
+            _listPicker.ItemsSource = combined;
+            if (_selectedListId != null)
+            {
+                var match = combined.FirstOrDefault(o => (o is ListRecord lr && lr.Id == _selectedListId) || (o is SharedListRecord sl && sl.Id == _selectedListId));
+                if (match != null) _listPicker.SelectedItem = match; else _listPicker.SelectedIndex = combined.Count > 0 ? 0 : -1;
+            }
+            else if (combined.Count > 0)
+            { _listPicker.SelectedIndex = 0; }
+        }, "Loading lists...");
     }
 
     private async Task RefreshListsAsync()
@@ -501,21 +586,20 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     // Selection helpers
     private void SetSingleSelection(ItemVm vm)
     {
-        foreach (var it in _allItems) it.IsSelected = false;
+        foreach (var it in _allItems)
+            it.IsSelected = false;
         _selectedItem = vm;
-        if (vm != null) vm.IsSelected = true;
+        if (vm != null)
+            vm.IsSelected = true;
         UpdateMoveButtons();
-        UpdateChildControls();
     }
     private void ClearSelectionAndUi()
     {
-        foreach (var it in _allItems) it.IsSelected = false;
+        foreach (var it in _allItems)
+            it.IsSelected = false;
         _selectedItem = null;
         UpdateMoveButtons();
-        UpdateChildControls();
     }
-
-    // Helper used by items partial
     private bool IsUnder(ItemVm parent, ItemVm candidate)
     {
         if (parent == null || candidate == null || parent.Id == candidate.Id) return false;
@@ -529,23 +613,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         }
         return false;
     }
-
-    // Card styling
-    private void ApplyItemCardStyle(Border b, ItemVm vm)
-    {
-        var primary = (Color)Application.Current!.Resources["Primary"];
-        var dark = Application.Current!.RequestedTheme == AppTheme.Dark;
-        var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
-        b.BackgroundColor = vm.IsSelected ? primary.WithAlpha(0.18f) : baseBg;
-        b.Stroke = vm.IsDragging ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
-    }
-    private void RefreshItemCardStyles()
-    {
-        foreach (var b in _itemCardBorders)
-            if (b.BindingContext is ItemVm vm) ApplyItemCardStyle(b, vm);
-    }
-
-    // Permissions / roles (uses _ownedLists / _sharedLists from Lists partial)
+    // Permissions
     private string? GetCurrentListRole()
     {
         var listId = _selectedListId; if (listId == null) return null;
@@ -553,8 +621,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         var shared = _sharedLists.FirstOrDefault(s => s.Id == listId.Value);
         return shared?.Role;
     }
-    private bool IsOwnerRole() => GetCurrentListRole() == "Owner";
-    public bool CanModifyItems() { var role = GetCurrentListRole(); return role == "Owner" || role == "Contributor"; }
+    public bool CanModifyItems() => (GetCurrentListRole()) is string r && (r == "Owner" || r == "Contributor");
     public bool CanReorderItems() => CanModifyItems();
     public bool CanAddItems() => CanModifyItems();
     public bool CanDeleteItems() => CanModifyItems();
@@ -564,43 +631,17 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     public bool CanDragItems() => CanModifyItems();
     private async Task ShowViewerBlockedAsync(string action)
     { try { await DisplayAlert("View Only", $"Your role (Viewer) does not permit {action}.", "OK"); } catch { } }
-
-    private void ScheduleHoverExpand(ItemVm vm)
+    private void UpdateMoveButtons()
     {
-        if (vm == null) return;
-        CancelHoverExpand(vm);
-        var cts = new CancellationTokenSource();
-        _hoverExpandCts[vm.Id] = cts;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(500, cts.Token);
-                if (!cts.IsCancellationRequested)
-                    await MainThread.InvokeOnMainThreadAsync(() => { vm.IsExpanded = true; RebuildVisibleItems(); });
-            }
-            catch (TaskCanceledException) { }
-        }, cts.Token);
+        if (_moveUpButton == null || _moveDownButton == null || _resetSubtreeButton == null) return;
+        bool hasSelection = _selectedItem != null;
+        bool canReorder = hasSelection && CanReorderItems();
+        _moveUpButton.IsEnabled = canReorder;
+        _moveDownButton.IsEnabled = canReorder;
+        _resetSubtreeButton.IsEnabled = hasSelection && CanResetSubtree();
     }
-    private void CancelHoverExpand(ItemVm vm) => CancelHoverExpand(vm.Id);
-    private void CancelHoverExpand(int itemId)
-    { if (_hoverExpandCts.TryGetValue(itemId, out var cts)) { try { cts.Cancel(); } catch { } _hoverExpandCts.Remove(itemId); } }
-
-    private async Task HandleDropAsync(ItemVm target, string action)
-    { await Task.CompletedTask; }
-    private async Task SafeHandleDropAsync(ItemVm target, string action)
-    {
-        try { await HandleDropAsync(target, action); _dragDropCompleted = true; }
-        catch (Exception ex) { if (_dragItem is { }) _dragItem.IsDragging = false; await DisplayAlert("Reorder Error", ex.Message, "OK"); }
-        finally
-        {
-            if (_dragItem is { }) { _dragItem.IsDragging = false; _dragItem.IsPreDrag = false; }
-            foreach (var it in _allItems) it.IsPreDrag = false;
-            _pendingDragVm = null; _dragItem = null;
-        }
-    }
-
-    private bool PollingSuppressed => _suppressListRevisionCheck; // alias to Items partial field
+    // Revision polling (reinsert)
+    private bool PollingSuppressed => _suppressListRevisionCheck;
     private void StartRevisionPolling()
     {
         StopRevisionPolling();
@@ -616,20 +657,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         });
     }
     private void StopRevisionPolling()
-    {
-        try { _pollCts?.Cancel(); } catch { }
-        _pollCts = null;
-    }
-    protected override void OnAppearing()
-    {
-        base.OnAppearing();
-        if (_selectedListId != null) StartRevisionPolling();
-    }
-    protected override void OnDisappearing()
-    {
-        base.OnDisappearing();
-        StopRevisionPolling();
-    }
+    { try { _pollCts?.Cancel(); } catch { } _pollCts = null; }
     private async Task CheckRevisionAsync()
     {
         if (_selectedListId == null) return;
@@ -638,43 +666,31 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             var current = await _db.GetListRevisionAsync(_selectedListId.Value);
             if (current != _lastRevision)
             {
-                // If within suppression window, accept new revision but skip heavy refresh
                 if (DateTime.UtcNow < _skipAutoRefreshUntil)
-                {
-                    _lastRevision = current; // acknowledge without refresh
-                    return;
-                }
+                { _lastRevision = current; return; }
                 _lastRevision = current;
                 await RefreshItemsAsync(false);
             }
         }
         catch { }
     }
+    protected override void OnAppearing()
+    { base.OnAppearing(); if (_selectedListId != null) StartRevisionPolling(); }
+    protected override void OnDisappearing()
+    { base.OnDisappearing(); StopRevisionPolling(); }
 
-    private void UpdateMoveButtons()
+    private void ApplyItemCardStyle(Border b, ItemVm vm)
     {
-        // Ensure buttons exist
-        if (_moveUpButton == null || _moveDownButton == null || _resetSubtreeButton == null) return;
-        bool hasSelection = _selectedItem != null;
-        bool canReorder = hasSelection && CanReorderItems();
-        _moveUpButton.IsEnabled = canReorder;
-        _moveDownButton.IsEnabled = canReorder;
-        _resetSubtreeButton.IsEnabled = hasSelection && CanResetSubtree();
+        var primary = (Color)Application.Current!.Resources["Primary"];
+        var dark = Application.Current!.RequestedTheme == AppTheme.Dark;
+        var baseBg = (Color)Application.Current!.Resources[dark ? "OffBlack" : "White"];
+        b.BackgroundColor = vm.IsSelected ? primary.WithAlpha(0.18f) : baseBg;
+        b.Stroke = vm.IsDragging ? primary : (Color)Application.Current!.Resources[dark ? "Gray600" : "Gray100"];
     }
-    private void UpdateChildControls()
+    private void RefreshItemCardStyles()
     {
-        if (_newChildEntry == null || _addChildButton == null) return;
-        if (_selectedItem == null)
-        {
-            _newChildEntry.IsVisible = false;
-            _addChildButton.IsVisible = false;
-            _addChildButton.IsEnabled = false;
-            return;
-        }
-        bool canAdd = _selectedItem.Level < 3 && CanAddItems();
-        _newChildEntry.IsVisible = canAdd;
-        _addChildButton.IsVisible = canAdd;
-        _addChildButton.IsEnabled = canAdd && !string.IsNullOrWhiteSpace(_newChildEntry.Text);
+        foreach (var b in _itemCardBorders)
+            if (b.BindingContext is ItemVm vm) ApplyItemCardStyle(b, vm);
     }
     private void UpdateStats()
     {
@@ -685,9 +701,6 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         _statsLabel.Text = $"Shown {shown} / Total {total} • Completed {completed}";
         _statsLabel.TextColor = completed == total && total > 0 ? Color.FromArgb("#008A2E") : (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "Gray300" : "Gray600"];
     }
-
-    private DateTime _recentLocalMutationUtc; // last local add/delete/child mutation time
-
     private async Task LoadHideCompletedPreferenceForSelectedListAsync()
     {
         if (_userId == null || _selectedListId == null) return;
@@ -704,15 +717,12 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         }
         catch { }
     }
-
     private async Task OnHideCompletedToggledAsync(bool value)
     {
         if (_suppressHideCompletedEvent) return;
         _hideCompleted = value;
         if (_userId != null && _selectedListId != null)
-        {
-            try { await _db.SetListHideCompletedAsync(_userId.Value, _selectedListId.Value, value); } catch { }
-        }
+        { try { await _db.SetListHideCompletedAsync(_userId.Value, _selectedListId.Value, value); } catch { } }
         RebuildVisibleItems();
     }
 }
