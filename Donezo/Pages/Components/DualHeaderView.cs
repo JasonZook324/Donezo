@@ -25,7 +25,7 @@ public class DualHeaderView : ContentView
     public event EventHandler<bool>? ThemeToggled;
     public event EventHandler? LogoutRequested;
     public event EventHandler? DashboardRequested;
-    public event EventHandler? ManageAccountRequested;
+    public event EventHandler? ManageAccountRequested; // navigates to //manageaccount route
     public event EventHandler? ManageListsRequested;
     // New: request page to toggle user menu overlay
     public event EventHandler? UserMenuToggleRequested;

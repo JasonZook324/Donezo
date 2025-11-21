@@ -34,4 +34,10 @@
         Route="shareoptions"
         ContentTemplate="{DataTemplate pages:ShareOptionsPage}" />
 
+    <!-- Manage Account route -->
+    <ShellContent
+        Title="Manage Account"
+        Route="manageaccount"
+        ContentTemplate="{DataTemplate pages:ManageAccountPage}" />
+
 </Shell>
