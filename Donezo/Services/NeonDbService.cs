@@ -56,6 +56,11 @@ public interface INeonDbService
     Task<bool> TransferOwnershipAsync(int listId, int newOwnerUserId, CancellationToken ct = default);
     Task<int?> GetListOwnerUserIdAsync(int listId, CancellationToken ct = default);
     Task<bool> SetItemCompletedByUserAsync(int itemId, int userId, bool completed, CancellationToken ct = default);
+    // Account management additions
+    Task<UserProfileRecord?> GetUserProfileAsync(int userId, CancellationToken ct = default);
+    Task<bool> UpdateUsernameAsync(int userId, string newUsername, CancellationToken ct = default);
+    Task<bool> UpdateEmailAsync(int userId, string newEmail, CancellationToken ct = default);
+    Task<bool> UpdatePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default);
 }
 
 public record ListRecord(int Id, string Name, bool IsDaily); // unchanged; soft-deleted lists are filtered out
@@ -63,6 +68,7 @@ public record SharedListRecord(int Id, string Name, bool IsDaily, string Role);
 public record ItemRecord(int Id, int ListId, string Name, bool IsCompleted, int? ParentItemId, bool HasChildren, int ChildrenCount, int IncompleteChildrenCount, int Level, string SortKey, int Order, int? CompletedByUserId, string? CompletedByUsername);
 public record ShareCodeRecord(int Id, int ListId, string Code, string Role, DateTime? ExpirationUtc, int MaxRedeems, int RedeemedCount, bool IsDeleted);
 public record MembershipRecord(int Id, int ListId, int UserId, string Username, string Role, DateTime JoinedUtc, bool Revoked, string? Code);
+public record UserProfileRecord(int Id, string Username, string? Email, string FirstName, string LastName, DateTime CreatedAt);
 
 public class NeonDbService : INeonDbService
 {
@@ -584,6 +590,70 @@ public class NeonDbService : INeonDbService
 
     public async Task<bool> SetItemCompletedByUserAsync(int itemId, int userId, bool completed, CancellationToken ct = default)
         => await SetItemCompletedByUserInternalAsync(itemId, userId, completed, ct);
+
+    // === Account Management Methods ===
+    public async Task<UserProfileRecord?> GetUserProfileAsync(int userId, CancellationToken ct = default)
+    {
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand("select id,username,email,first_name,last_name,created_at from users where id=@id", conn);
+        cmd.Parameters.AddWithValue("id", userId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return null;
+        return new UserProfileRecord(r.GetInt32(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2), r.GetString(3), r.GetString(4), r.GetDateTime(5));
+    }
+
+    public async Task<bool> UpdateUsernameAsync(int userId, string newUsername, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(newUsername)) return false;
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        // Unique check (case-insensitive)
+        await using (var chk = new NpgsqlCommand("select 1 from users where lower(username)=lower(@u) and id<>@id", conn))
+        { chk.Parameters.AddWithValue("u", newUsername); chk.Parameters.AddWithValue("id", userId); if (await chk.ExecuteScalarAsync(ct) != null) return false; }
+        await using var cmd = new NpgsqlCommand("update users set username=@u where id=@id", conn);
+        cmd.Parameters.AddWithValue("u", newUsername);
+        cmd.Parameters.AddWithValue("id", userId);
+        return await cmd.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> UpdateEmailAsync(int userId, string newEmail, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(newEmail) || !Regex.IsMatch(newEmail, @"^[^@\s]+@[^@\s]+\.[^@\s]+$")) return false;
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        await using (var chk = new NpgsqlCommand("select 1 from users where lower(email)=lower(@e) and id<>@id", conn))
+        { chk.Parameters.AddWithValue("e", newEmail); chk.Parameters.AddWithValue("id", userId); if (await chk.ExecuteScalarAsync(ct) != null) return false; }
+        await using var cmd = new NpgsqlCommand("update users set email=@e where id=@id", conn);
+        cmd.Parameters.AddWithValue("e", newEmail);
+        cmd.Parameters.AddWithValue("id", userId);
+        return await cmd.ExecuteNonQueryAsync(ct) == 1;
+    }
+
+    public async Task<bool> UpdatePasswordAsync(int userId, string currentPassword, string newPassword, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(newPassword) || newPassword.Length < 6) return false;
+        await EnsureSchemaAsync(ct);
+        await using var conn = new NpgsqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        // Read current hash + salt
+        string? storedHash = null; string? storedSaltBase64 = null;
+        await using (var read = new NpgsqlCommand("select password_hash,password_salt from users where id=@id", conn))
+        { read.Parameters.AddWithValue("id", userId); await using var r = await read.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return false; storedHash = r.GetString(0); storedSaltBase64 = r.GetString(1); }
+        if (storedHash == null || storedSaltBase64 == null) return false;
+        var saltBytes = Convert.FromBase64String(storedSaltBase64);
+        // Verify current password
+        var recomputed = HashPassword(currentPassword, saltBytes, ExtractIterations(storedHash));
+        if (!ConstantTimeEquals(storedHash, recomputed)) return false;
+        // Generate new hash + salt
+        var newSalt = GenerateSalt(16);
+        var newHash = HashPassword(newPassword, newSalt, 100_000);
+        await using (var upd = new NpgsqlCommand("update users set password_hash=@h,password_salt=@s where id=@id", conn))
+        { upd.Parameters.AddWithValue("h", newHash); upd.Parameters.AddWithValue("s", Convert.ToBase64String(newSalt)); upd.Parameters.AddWithValue("id", userId); return await upd.ExecuteNonQueryAsync(ct) == 1; }
+    }
 
     private async Task<bool> SetItemCompletedByUserInternalAsync(int itemId, int userId, bool completed, CancellationToken ct)
     {
