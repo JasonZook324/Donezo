@@ -86,22 +86,35 @@ public partial class DashboardPage
             var card = new Border { StrokeThickness=1, StrokeShape=new RoundRectangle { CornerRadius=new CornerRadius(10)}, Padding=new Thickness(6,0,4,0)};
             card.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelBorderGapConverter()));
             var grid = new Grid { Padding=new Thickness(4,4), ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(new GridLength(28)), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
+            // Collapse expand column width for leaf nodes so name shifts left
+            var expandContainer = new Grid { WidthRequest=28, HeightRequest=28 };
+            expandContainer.Triggers.Add(new DataTrigger(typeof(Grid))
+            {
+                Binding = new Binding("HasChildren"),
+                Value = false,
+                Setters = { new Setter { Property = Grid.WidthRequestProperty, Value = 0 } }
+            });
             var badge = new Label { Margin=new Thickness(4,0), VerticalTextAlignment=TextAlignment.Center, FontAttributes=FontAttributes.Bold };
             badge.SetBinding(Label.TextProperty, new Binding(".", converter:new LevelBadgeConverter()));
             badge.SetBinding(Label.TextColorProperty, new Binding(".", converter:new LevelAccentColorConverter())); grid.Add(badge,0,0);
             void OnDragStarting(object? s, DragStartingEventArgs e){ if (!CanDragItems()) return; if (card.BindingContext is ItemVm vm){ _holdCts?.Cancel(); vm.IsPreDrag=false; vm.IsDragging=true; ApplyItemCardStyle(card,vm); _dragItem=vm; _pendingDragVm=vm; try{ e.Data.Properties["ItemId"] = vm.Id;}catch{} } }
             var drag = new DragGestureRecognizer{ CanDrag=true }; drag.DragStarting += OnDragStarting; card.GestureRecognizers.Add(drag);
-            // Always reserve expand column space; hide chevrons when no children instead of collapsing column.
-            var expandContainer = new Grid { WidthRequest=28, HeightRequest=28 };
             var chevronRight = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M8 6 L16 12 L8 18") };
             chevronRight.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronRightVisibilityConverter() });
             var chevronDown = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M6 9 L12 15 L18 9") };
             chevronDown.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronDownVisibilityConverter() });
-            expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown);
-            var expandTap = new TapGestureRecognizer(); expandTap.Tapped += async (_,__) => { if (card.BindingContext is ItemVm vm){ if (!vm.HasChildren) return; bool collapsing = vm.IsExpanded; if (collapsing) { CollapseIncremental(vm); if (_selectedItem!=null && IsUnder(vm,_selectedItem)) SetSingleSelection(vm); } else { ExpandIncremental(vm); } _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3); _recentLocalMutationUtc = DateTime.UtcNow; if (_userId!=null) await _db.SetItemExpandedAsync(_userId.Value, vm.Id, vm.IsExpanded); } }; expandContainer.GestureRecognizers.Add(expandTap); grid.Add(expandContainer,1,0);
+            expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown); grid.Add(expandContainer,1,0);
             var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center }; nameLabel.SetBinding(Label.TextProperty, "Name"); nameLabel.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameLabel.SetBinding(IsVisibleProperty, new Binding("IsRenaming", converter:new InvertBoolConverter()));
             var nameEntry = new Entry { HeightRequest=32, FontSize=14 }; nameEntry.SetBinding(Entry.TextProperty, "EditableName", BindingMode.TwoWay); nameEntry.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameEntry.SetBinding(IsVisibleProperty, "IsRenaming");
-            var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry } }; grid.Add(nameContainer,2,0);
+            var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry } };
+            // Leaf items: shift name left by width of missing chevron column (approx 20px)
+            nameContainer.Triggers.Add(new DataTrigger(typeof(HorizontalStackLayout))
+            {
+                Binding = new Binding("HasChildren"),
+                Value = false,
+                Setters = { new Setter { Property = View.TranslationXProperty, Value = -20 } }
+            });
+            grid.Add(nameContainer,2,0);
             var statusStack = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center };
             var completedInfoLabel = new Label { FontSize=11, TextColor=Color.FromArgb("#008A2E"), FontAttributes=FontAttributes.Italic, LineBreakMode=LineBreakMode.TailTruncation, VerticalTextAlignment=TextAlignment.Center }; completedInfoLabel.SetBinding(Label.TextProperty,"CompletedInfo"); completedInfoLabel.SetBinding(Label.IsVisibleProperty,"ShowCompletedInfo");
             var check = new CheckBox(); check.SetBinding(CheckBox.IsCheckedProperty,"IsCompleted"); check.CheckedChanged += async (_,e)=>{ if (_suppressCompletionEvent) return; if (!CanCompleteItems()){ _suppressCompletionEvent=true; if (check.BindingContext is ItemVm vmPrior){ var prior=!e.Value; vmPrior.IsCompleted=prior; check.IsChecked=prior; } _suppressCompletionEvent=false; await ShowViewerBlockedAsync("changing completion state"); return; } if (check.BindingContext is ItemVm vmC) await ToggleItemCompletionInlineAsync(vmC, e.Value); }; check.IsEnabled = CanCompleteItems();
