@@ -133,11 +133,34 @@ public class DualHeaderView : ContentView
 
     private View BuildMenuItem(string text, Action action, bool isDestructive = false)
     {
-        var lbl = new Label { Text = text, TextColor = isDestructive ? Colors.OrangeRed : Colors.White, FontSize = 14 };
+        // Wrap label in a border so we can highlight background on hover
+        var border = new Border
+        {
+            BackgroundColor = Colors.Transparent,
+            StrokeThickness = 0,
+            Padding = new Thickness(8,6),
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(6) }
+        };
+        var lbl = new Label { Text = text, TextColor = isDestructive ? Colors.OrangeRed : Colors.White, FontSize = 14, VerticalTextAlignment = TextAlignment.Center };
+        border.Content = lbl;
+
         var tap = new TapGestureRecognizer();
         tap.Tapped += (_, _) => action();
-        lbl.GestureRecognizers.Add(tap);
-        return lbl;
+        border.GestureRecognizers.Add(tap);
+
+        // Pointer (hover) events for highlight
+        var pointer = new PointerGestureRecognizer();
+        pointer.PointerEntered += (_, _) =>
+        {
+            border.BackgroundColor = isDestructive ? Colors.OrangeRed.WithAlpha(0.18f) : Colors.White.WithAlpha(0.18f);
+        };
+        pointer.PointerExited += (_, _) =>
+        {
+            border.BackgroundColor = Colors.Transparent;
+        };
+        border.GestureRecognizers.Add(pointer);
+
+        return border;
     }
 
     private Grid BuildUserIcon()
