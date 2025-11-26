@@ -30,6 +30,96 @@ public partial class DashboardPage
         }
     }
 
+    // Helper to invoke per-item menu actions
+    private async Task ShowItemMenuAsync(ItemVm vm, VisualElement anchor)
+    {
+        // Compute availability
+        bool canReorder = CanReorderItems();
+        var siblings = _allItems.Where(x => x.ParentId == vm.ParentId).OrderBy(x => x.Order).ThenBy(x => x.Id).ToList();
+        int idx = siblings.FindIndex(x => x.Id == vm.Id);
+        bool isTop = idx <= 0;
+        bool isBottom = idx >= siblings.Count - 1;
+        bool hasSubtree = vm.HasChildren || vm.ChildrenCount > 0;
+
+        var cancel = vm.IsRenaming ? "Cancel" : null;
+        var actions = new List<string>();
+        actions.Add(vm.IsRenaming ? "Save" : "Rename");
+        actions.Add("Delete");
+        if (canReorder && !isTop) actions.Add("Move Up");
+        if (canReorder && !isBottom) actions.Add("Move Down");
+        if (CanResetSubtree() && hasSubtree) actions.Add("Reset Subtree");
+
+        string? choice = null;
+        try { choice = await DisplayActionSheet("Item", cancel, null, actions.ToArray()); } catch { }
+        if (string.IsNullOrEmpty(choice)) return;
+
+        if (choice == "Delete")
+        {
+            if (!CanDeleteItems()) { await ShowViewerBlockedAsync("deleting items"); return; }
+            await DeleteItemInlineAsync(vm);
+            return;
+        }
+        if (choice == "Rename" || choice == "Save")
+        {
+            if (!CanRenameItems()) { await ShowViewerBlockedAsync("renaming items"); return; }
+            if (!vm.IsRenaming)
+            {
+                vm.EditableName = vm.Name; vm.IsRenaming = true; // inline buttons will appear
+            }
+            else
+            {
+                await CommitRenameAsync(vm);
+            }
+            return;
+        }
+        if (choice == "Move Up")
+        {
+            if (!CanReorderItems() || isTop) { await ShowViewerBlockedAsync("reordering items"); return; }
+            SetSingleSelection(vm);
+            await MoveSelectedAsync(-1);
+            return;
+        }
+        if (choice == "Move Down")
+        {
+            if (!CanReorderItems() || isBottom) { await ShowViewerBlockedAsync("reordering items"); return; }
+            SetSingleSelection(vm);
+            await MoveSelectedAsync(1);
+            return;
+        }
+        if (choice == "Reset Subtree")
+        {
+            if (!CanResetSubtree() || !hasSubtree) { await ShowViewerBlockedAsync("resetting subtree"); return; }
+            SetSingleSelection(vm);
+            await ResetSelectedSubtreeAsync();
+            return;
+        }
+    }
+
+    private async Task CommitRenameAsync(ItemVm vm)
+    {
+        if (!CanRenameItems()) { await ShowViewerBlockedAsync("renaming items"); return; }
+        var newName = vm.EditableName?.Trim();
+        if (string.IsNullOrWhiteSpace(newName) || newName == vm.Name)
+        {
+            vm.IsRenaming = false; vm.EditableName = vm.Name; return;
+        }
+        try
+        {
+            var rev = await _db.GetListRevisionAsync(vm.ListId);
+            var res = await _db.RenameItemAsync(vm.Id, newName!, rev);
+            if (!res.Ok)
+            {
+                await DisplayAlert("Rename", "Concurrency mismatch; items refreshed.", "OK");
+                await RefreshItemsAsync(true); return;
+            }
+            vm.Name = newName!; vm.IsRenaming = false; vm.RecalcState(); RebuildVisibleItems(); _lastRevision = res.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+        }
+        catch (Exception ex)
+        {
+            await DisplayAlert("Rename Failed", ex.Message, "OK"); await RefreshItemsAsync(true);
+        }
+    }
+
     // Rebuild visible (flat list) respecting hide-completed & expansion
     private void RebuildVisibleItems()
     {
@@ -76,22 +166,20 @@ public partial class DashboardPage
         _statsLabel ??= new Label { FontSize=12, TextColor=(Color)Application.Current!.Resources[Application.Current!.RequestedTheme==AppTheme.Dark?"Gray300":"Gray600"], HorizontalTextAlignment=TextAlignment.End };
         _itemViewTemplate = CreateItemTemplate();
         _itemsView = new CollectionView { ItemsSource=_items, SelectionMode=SelectionMode.None, ItemTemplate=_itemViewTemplate, ItemsUpdatingScrollMode=ItemsUpdatingScrollMode.KeepScrollOffset };
-        _moveUpButton = new Button { Text="Move Up", Style=(Style)Application.Current!.Resources["OutlinedButton"], FontSize=12, IsEnabled=false };
-        _moveUpButton.Clicked += async (_,__) => { if (!CanReorderItems()) { await ShowViewerBlockedAsync("reordering items"); return; } await MoveSelectedAsync(-1); };
-        _moveDownButton = new Button { Text="Move Down", Style=(Style)Application.Current!.Resources["OutlinedButton"], FontSize=12, IsEnabled=false };
-        _moveDownButton.Clicked += async (_,__) => { if (!CanReorderItems()) { await ShowViewerBlockedAsync("reordering items"); return; } await MoveSelectedAsync(1); };
-        _resetSubtreeButton = new Button { Text="Reset Subtree", Style=(Style)Application.Current!.Resources["OutlinedButton"], FontSize=12, IsEnabled=false };
-        _resetSubtreeButton.Clicked += async (_,__) => { if (!CanResetSubtree()) { await ShowViewerBlockedAsync("resetting subtree"); return; } await ResetSelectedSubtreeAsync(); };
-        _hideCompletedSwitch = new Switch { IsToggled=_hideCompleted }; _hideCompletedSwitch.Toggled += async (_,e)=> await OnHideCompletedToggledAsync(e.Value);
-        Dispatcher.StartTimer(TimeSpan.FromMilliseconds(400), () => { UpdateMoveButtons(); return true; });
-        var header = new Grid { ColumnDefinitions = { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) }, ColumnSpacing=8 };
+        // Remove header action buttons; actions are now in item menu
+        var header = new Grid { ColumnDefinitions = { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Star) }, ColumnSpacing=8 };
         header.Add(new Label { Text="Items", Style=(Style)Application.Current!.Resources["SectionTitle"], VerticalTextAlignment=TextAlignment.Center },0,0);
-        header.Add(_statsLabel,1,0); header.Add(_moveUpButton,2,0); header.Add(_moveDownButton,3,0); header.Add(_resetSubtreeButton,4,0);
+        header.Add(_statsLabel,1,0);
+        // Initialize switch before adding to filter row
+        _hideCompletedSwitch = new Switch { IsToggled=_hideCompleted };
+        _hideCompletedSwitch.Toggled += async (_,e)=> await OnHideCompletedToggledAsync(e.Value);
         var filterRow = new HorizontalStackLayout { Spacing=8, Children={ new Label { Text="Hide Completed" }, _hideCompletedSwitch } };
         _openNewItemButton = new Button { Text = "+ New Item", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _openNewItemButton.Clicked += (_,__) => ShowNewItemOverlay();
         var newButtonRow = new HorizontalStackLayout { Children = { _openNewItemButton }, HorizontalOptions = LayoutOptions.Start };
-        var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) }, Padding = new Thickness(6,0,4,0), Content = new VerticalStackLayout { Spacing=12, Padding=16, Children = { newButtonRow, header, filterRow, _emptyFilteredLabel, _itemsView } } };
+        // New: List selection row inside card
+        var listRow = new HorizontalStackLayout { Spacing = 8, Children = { new Label { Text = "List", VerticalTextAlignment = TextAlignment.Center }, _listPicker } };
+        var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) }, Padding = new Thickness(6,0,4,0), Content = new VerticalStackLayout { Spacing=12, Padding=16, Children = { newButtonRow, listRow, header, filterRow, _emptyFilteredLabel, _itemsView } } };
         card.Style = (Style)Application.Current!.Resources["CardBorder"]; return card;
     }
 
@@ -268,11 +356,25 @@ public partial class DashboardPage
                         var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
                         if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
                         expected = moveRes.NewRevision;
+                        // Parent change affects hierarchy; perform a refresh for consistency
+                        await RefreshItemsAsync(true);
+                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        return;
                     }
                     var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
                     if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                    dragItem.Order = newOrder;
+                    // Incremental visible move when possible
+                    var currentVisIdx = _items.IndexOf(dragItem);
+                    var targetVisIdx = _items.IndexOf(target);
+                    if(currentVisIdx>=0 && targetVisIdx>=0){
+                        int newVisIdx = Math.Max(0, targetVisIdx);
+                        if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
+                        RefreshItemCardStyles(); UpdateStats();
+                    } else {
+                        await RefreshItemsAsync(true);
+                    }
                     _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
                 }
                 catch { await RefreshItemsAsync(true); }
             };
@@ -306,11 +408,24 @@ public partial class DashboardPage
                         var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
                         if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
                         expected = moveRes.NewRevision;
+                        // Parent change affects hierarchy; perform a refresh for consistency
+                        await RefreshItemsAsync(true);
+                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        return;
                     }
                     var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
                     if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                    dragItem.Order = newOrder;
+                    var currentVisIdx = _items.IndexOf(dragItem);
+                    var targetVisIdx = _items.IndexOf(target);
+                    if(currentVisIdx>=0 && targetVisIdx>=0){
+                        int newVisIdx = Math.Min(_items.Count-1, targetVisIdx+1);
+                        if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
+                        RefreshItemCardStyles(); UpdateStats();
+                    } else {
+                        await RefreshItemsAsync(true);
+                    }
                     _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
                 }
                 catch { await RefreshItemsAsync(true); }
             };
@@ -377,7 +492,17 @@ public partial class DashboardPage
 
             var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center }; nameLabel.SetBinding(Label.TextProperty, "Name"); nameLabel.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameLabel.SetBinding(IsVisibleProperty, new Binding("IsRenaming", converter:new InvertBoolConverter()));
             var nameEntry = new Entry { HeightRequest=32, FontSize=14 }; nameEntry.SetBinding(Entry.TextProperty, "EditableName", BindingMode.TwoWay); nameEntry.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameEntry.SetBinding(IsVisibleProperty, "IsRenaming");
-            var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry } };
+            nameEntry.Completed += async (_, __) => { if (card.BindingContext is ItemVm vmComp && vmComp.IsRenaming) await CommitRenameAsync(vmComp); };
+            nameEntry.Unfocused += async (_, __) => { if (card.BindingContext is ItemVm vmUnf && vmUnf.IsRenaming) await CommitRenameAsync(vmUnf); };
+            nameEntry.PropertyChanged += (_, pe) => { if (pe.PropertyName == nameof(Entry.IsVisible) && nameEntry.IsVisible) Device.BeginInvokeOnMainThread(() => nameEntry.Focus()); };
+            // Inline rename action buttons
+            var inlineSaveBtn = new Button { Text = "Save", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
+            inlineSaveBtn.SetBinding(IsVisibleProperty, "IsRenaming");
+            inlineSaveBtn.Clicked += async (_, __) => { if (inlineSaveBtn.BindingContext is ItemVm vmSave && vmSave.IsRenaming) await CommitRenameAsync(vmSave); };
+            var inlineCancelBtn = new Button { Text = "Cancel", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
+            inlineCancelBtn.SetBinding(IsVisibleProperty, "IsRenaming");
+            inlineCancelBtn.Clicked += (_, __) => { if (inlineCancelBtn.BindingContext is ItemVm vmCancel) { vmCancel.IsRenaming = false; vmCancel.EditableName = vmCancel.Name; } };
+            var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry, inlineSaveBtn, inlineCancelBtn } };
             // Leaf items: shift name left by width of missing chevron column (approx 20px)
             nameContainer.Triggers.Add(new DataTrigger(typeof(HorizontalStackLayout))
             {
@@ -391,9 +516,11 @@ public partial class DashboardPage
             var check = new CheckBox(); check.SetBinding(CheckBox.IsCheckedProperty,"IsCompleted"); check.CheckedChanged += async (_,e)=>{ if (_suppressCompletionEvent) return; if (!CanCompleteItems()){ _suppressCompletionEvent=true; if (check.BindingContext is ItemVm vmPrior){ var prior=!e.Value; vmPrior.IsCompleted=prior; check.IsChecked=prior; } _suppressCompletionEvent=false; await ShowViewerBlockedAsync("changing completion state"); return; } if (check.BindingContext is ItemVm vmC) await ToggleItemCompletionInlineAsync(vmC, e.Value); }; check.IsEnabled = CanCompleteItems();
             var partialIndicator = new Label { FontAttributes=FontAttributes.Bold, TextColor=Colors.Orange, FontSize=14, WidthRequest=12, HorizontalTextAlignment=TextAlignment.Center, VerticalTextAlignment=TextAlignment.Center }; partialIndicator.SetBinding(Label.TextProperty,"PartialGlyph");
             statusStack.Children.Add(completedInfoLabel); statusStack.Children.Add(check); statusStack.Children.Add(partialIndicator); content.Add(statusStack,3,0);
-            var deleteBtn = new Button { Text="Delete", Style=(Style)Application.Current!.Resources["OutlinedButton"], TextColor=Colors.Red, FontSize=12, Padding=new Thickness(6,2) }; deleteBtn.Clicked += async (_,__) => { if (!CanDeleteItems()){ await ShowViewerBlockedAsync("deleting items"); return; } if (deleteBtn.BindingContext is ItemVm vmD) await DeleteItemInlineAsync(vmD); }; deleteBtn.IsEnabled = CanDeleteItems(); content.Add(deleteBtn,4,0);
-            var renameBtn = new Button { Style=(Style)Application.Current!.Resources["OutlinedButton"], FontSize=12, Padding=new Thickness(6,2) }; renameBtn.SetBinding(Button.TextProperty, new Binding("IsRenaming", converter:new BoolToStringConverter { TrueText="Save", FalseText="Rename" })); renameBtn.Clicked += async (_,__) => { if (!CanRenameItems()){ await ShowViewerBlockedAsync("renaming items"); return; } if (renameBtn.BindingContext is ItemVm vmR){ if (!vmR.IsRenaming){ vmR.EditableName = vmR.Name; vmR.IsRenaming=true; } else { var newName = vmR.EditableName?.Trim(); if (string.IsNullOrWhiteSpace(newName) || newName==vmR.Name){ vmR.IsRenaming=false; return; } try { var rev = await _db.GetListRevisionAsync(vmR.ListId); var res = await _db.RenameItemAsync(vmR.Id,newName,rev); if (!res.Ok){ await DisplayAlert("Rename","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return; } vmR.Name=newName; vmR.IsRenaming=false; vmR.RecalcState(); RebuildVisibleItems(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Rename Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} } } }; renameBtn.IsEnabled = CanRenameItems(); content.Add(renameBtn,5,0);
-            var cancelBtn = new Button { Text="Cancel", Style=(Style)Application.Current!.Resources["OutlinedButton"], FontSize=12, Padding=new Thickness(6,2) }; cancelBtn.SetBinding(IsVisibleProperty,"IsRenaming"); cancelBtn.Clicked += (_,__) => { if (cancelBtn.BindingContext is ItemVm vmCxl){ vmCxl.IsRenaming=false; vmCxl.EditableName=vmCxl.Name; } }; content.Add(cancelBtn,6,0);
+
+            // Three-dot menu button
+            var menuBtn = new Button { Text = "?", FontSize = 16, Padding = new Thickness(6,2), Style = (Style)Application.Current!.Resources["OutlinedButton"], HorizontalOptions = LayoutOptions.End };
+            menuBtn.Clicked += async (s, e) => { if (menuBtn.BindingContext is ItemVm vmMenu) await ShowItemMenuAsync(vmMenu, menuBtn); };
+            content.Add(menuBtn,4,0);
 
             // Put content in middle row of outer grid
             Grid.SetRow(content, 1);
@@ -439,16 +566,11 @@ public partial class DashboardPage
                 if (dragItem == null) return;
                 if (card.BindingContext is not ItemVm current) return;
                 // Find next visible item to compute in-between order
-                var idx = _items.IndexOf(current);
-                ItemVm? next = (idx >= 0 && idx + 1 < _items.Count) ? _items[idx + 1] : null;
-                // If next has a different parent than current, we still treat as drop after current
+                var idx2 = _items.IndexOf(current);
+                ItemVm? next = (idx2 >= 0 && idx2 + 1 < _items.Count) ? _items[idx2 + 1] : null;
                 int newOrder = current.Order + 1;
                 if (next != null)
-                {
-                    // Prefer a midpoint based on surrounding orders; using +1 keeps semantic with server sparse ordering
-                    // If dropping before 'next', use next.Order - 1
-                    newOrder = next.Order - 1;
-                }
+                { newOrder = next.Order - 1; }
                 try
                 {
                     long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
@@ -458,11 +580,20 @@ public partial class DashboardPage
                         var moveRes = await _db.MoveItemAsync(dragItem.Id, targetParent, expected);
                         if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
                         expected = moveRes.NewRevision;
+                        // Parent change affects hierarchy; perform a refresh for consistency
+                        await RefreshItemsAsync(true);
+                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        return;
                     }
                     var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
                     if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                    dragItem.Order = newOrder;
+                    // Incremental visible move after current
+                    var curVisIdx = _items.IndexOf(dragItem);
+                    var afterVisIdx = idx2>=0 ? Math.Min(_items.Count-1, idx2+1) : -1;
+                    if(curVisIdx>=0 && afterVisIdx>=0){ _items.RemoveAt(curVisIdx); _items.Insert(afterVisIdx, dragItem); RefreshItemCardStyles(); UpdateStats(); }
+                    else { await RefreshItemsAsync(true); }
                     _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
                 }
                 catch { await RefreshItemsAsync(true); }
             };
@@ -564,7 +695,28 @@ public class ChevronDownVisibilityConverter : IMultiValueConverter
 
     // Child item creation removed per requirement.
     private async Task DeleteItemInlineAsync(ItemVm vm){ var listId=_selectedListId; if(listId==null) return; var expected=await _db.GetListRevisionAsync(listId.Value); var result=await _db.DeleteItemAsync(vm.Id,expected); if(result.Ok){ RemoveLocalSubtree(vm); RebuildVisibleItems(); UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} else await RefreshItemsAsync(true); }
-    private async Task MoveSelectedAsync(int delta){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; var siblings=_allItems.Where(x=>x.ParentId==_selectedItem.ParentId).OrderBy(x=>x.Order).ThenBy(x=>x.Id).ToList(); int idx=siblings.FindIndex(x=>x.Id==_selectedItem.Id); if(idx<0) return; int target=idx+delta; if(target<0||target>=siblings.Count) return; int newOrder = delta<0 ? siblings[target].Order-1 : siblings[target].Order+1; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var res=await _db.SetItemOrderAsync(_selectedItem.Id,newOrder,expected); if(!res.Ok){ await RefreshItemsAsync(true); return;} _selectedItem.Order=newOrder; if(_selectedItem.ParentId!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==_selectedItem.ParentId.Value); parent?.Children.Sort((a,b)=>a.Order.CompareTo(b.Order)); } RebuildVisibleItems(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
+    private async Task MoveSelectedAsync(int delta){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; var siblings=_allItems.Where(x=>x.ParentId==_selectedItem.ParentId).OrderBy(x=>x.Order).ThenBy(x=>x.Id).ToList(); int idx=siblings.FindIndex(x=>x.Id==_selectedItem.Id); if(idx<0) return; int target=idx+delta; if(target<0||target>=siblings.Count) return; int newOrder = delta<0 ? siblings[target].Order-1 : siblings[target].Order+1; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var res=await _db.SetItemOrderAsync(_selectedItem.Id,newOrder,expected); if(!res.Ok){ await RefreshItemsAsync(true); return;} // Update local order
+            _selectedItem.Order=newOrder;
+            // Keep children list ordered
+            if(_selectedItem.ParentId!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==_selectedItem.ParentId.Value); parent?.Children.Sort((a,b)=>a.Order.CompareTo(b.Order)); }
+            // Incremental move in visible list when both positions are visible and same parent
+            var oldVisIdx = _items.IndexOf(_selectedItem);
+            if(oldVisIdx>=0){ // find neighbor to compute new visible index
+                // Determine target visible index by locating the sibling at 'target' if visible
+                var targetSibling = siblings[target];
+                var targetVisIdx = _items.IndexOf(targetSibling);
+                if(targetVisIdx>=0){
+                    // Move selected item before or after target based on delta
+                    int newVisIdx = delta<0 ? targetVisIdx : targetVisIdx+1;
+                    // Clamp within bounds
+                    newVisIdx = Math.Max(0, Math.Min(newVisIdx, _items.Count-1));
+                    if(newVisIdx!=oldVisIdx){ _items.RemoveAt(oldVisIdx); _items.Insert(newVisIdx, _selectedItem); }
+                } else {
+                    // If target sibling not visible (e.g., filtered or collapsed), do minimal list refresh for affected region
+                    // Fallback: leave position; styles and stats still update
+                }
+            }
+            RefreshItemCardStyles(); UpdateStats(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
     private async Task ResetSelectedSubtreeAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var (ok,newRev,affected)=await _db.ResetSubtreeAsync(_selectedItem.Id,expected); if(!ok){ await DisplayAlert("Reset","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return;} void Mark(ItemVm n){ n.IsCompleted=false; n.CompletedAtUtc=null; n.CompletedByUsername=null; foreach(var c in n.Children) Mark(c); n.RecalcState(); } Mark(_selectedItem); RebuildVisibleItems(); UpdateCompletedSummary(); _lastRevision=newRev; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Reset Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} }
     private async Task ToggleItemCompletionInlineAsync(ItemVm vm,bool completed){ if(_selectedListId==null || _userId==null) return; try{ var ok=await _db.SetItemCompletedByUserAsync(vm.Id,_userId.Value,completed); if(!ok){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion","Cannot complete item yet (children incomplete)","OK"); return;} _suppressCompletionEvent=true; vm.IsCompleted=completed; vm.CompletedAtUtc=completed?DateTime.UtcNow:null; vm.CompletedByUsername=completed? _username : null; vm.RecalcState(); _suppressCompletionEvent=false; if(completed){ var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.Children.All(c=>c.IsCompleted)){ parent.IsCompleted=true; parent.CompletedAtUtc=DateTime.UtcNow; parent.CompletedByUsername=_username; parent.RecalcState(); pid=parent.ParentId; } else break; } } else { var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.IsCompleted){ parent.IsCompleted=false; parent.CompletedAtUtc=null; parent.CompletedByUsername=null; parent.RecalcState(); } pid=parent.ParentId; } } if(_hideCompleted && completed){ // incremental removal instead of full rebuild
             for(int i=_items.Count-1;i>=0;i--){ if(_items[i].IsCompleted) _items.RemoveAt(i); }
