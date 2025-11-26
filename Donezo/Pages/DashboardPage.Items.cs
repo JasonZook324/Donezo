@@ -170,8 +170,10 @@ public partial class DashboardPage
         var header = new Grid { ColumnDefinitions = { new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Star) }, ColumnSpacing=8 };
         header.Add(new Label { Text="Items", Style=(Style)Application.Current!.Resources["SectionTitle"], VerticalTextAlignment=TextAlignment.Center },0,0);
         header.Add(_statsLabel,1,0);
+        // Initialize switch before adding to filter row
+        _hideCompletedSwitch = new Switch { IsToggled=_hideCompleted };
+        _hideCompletedSwitch.Toggled += async (_,e)=> await OnHideCompletedToggledAsync(e.Value);
         var filterRow = new HorizontalStackLayout { Spacing=8, Children={ new Label { Text="Hide Completed" }, _hideCompletedSwitch } };
-        _hideCompletedSwitch = new Switch { IsToggled=_hideCompleted }; _hideCompletedSwitch.Toggled += async (_,e)=> await OnHideCompletedToggledAsync(e.Value);
         _openNewItemButton = new Button { Text = "+ New Item", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
         _openNewItemButton.Clicked += (_,__) => ShowNewItemOverlay();
         var newButtonRow = new HorizontalStackLayout { Children = { _openNewItemButton }, HorizontalOptions = LayoutOptions.Start };
@@ -354,11 +356,25 @@ public partial class DashboardPage
                         var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
                         if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
                         expected = moveRes.NewRevision;
+                        // Parent change affects hierarchy; perform a refresh for consistency
+                        await RefreshItemsAsync(true);
+                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        return;
                     }
                     var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
                     if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                    dragItem.Order = newOrder;
+                    // Incremental visible move when possible
+                    var currentVisIdx = _items.IndexOf(dragItem);
+                    var targetVisIdx = _items.IndexOf(target);
+                    if(currentVisIdx>=0 && targetVisIdx>=0){
+                        int newVisIdx = Math.Max(0, targetVisIdx);
+                        if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
+                        RefreshItemCardStyles(); UpdateStats();
+                    } else {
+                        await RefreshItemsAsync(true);
+                    }
                     _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
                 }
                 catch { await RefreshItemsAsync(true); }
             };
@@ -392,11 +408,24 @@ public partial class DashboardPage
                         var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
                         if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
                         expected = moveRes.NewRevision;
+                        // Parent change affects hierarchy; perform a refresh for consistency
+                        await RefreshItemsAsync(true);
+                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        return;
                     }
                     var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
                     if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                    dragItem.Order = newOrder;
+                    var currentVisIdx = _items.IndexOf(dragItem);
+                    var targetVisIdx = _items.IndexOf(target);
+                    if(currentVisIdx>=0 && targetVisIdx>=0){
+                        int newVisIdx = Math.Min(_items.Count-1, targetVisIdx+1);
+                        if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
+                        RefreshItemCardStyles(); UpdateStats();
+                    } else {
+                        await RefreshItemsAsync(true);
+                    }
                     _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
                 }
                 catch { await RefreshItemsAsync(true); }
             };
@@ -537,16 +566,11 @@ public partial class DashboardPage
                 if (dragItem == null) return;
                 if (card.BindingContext is not ItemVm current) return;
                 // Find next visible item to compute in-between order
-                var idx = _items.IndexOf(current);
-                ItemVm? next = (idx >= 0 && idx + 1 < _items.Count) ? _items[idx + 1] : null;
-                // If next has a different parent than current, we still treat as drop after current
+                var idx2 = _items.IndexOf(current);
+                ItemVm? next = (idx2 >= 0 && idx2 + 1 < _items.Count) ? _items[idx2 + 1] : null;
                 int newOrder = current.Order + 1;
                 if (next != null)
-                {
-                    // Prefer a midpoint based on surrounding orders; using +1 keeps semantic with server sparse ordering
-                    // If dropping before 'next', use next.Order - 1
-                    newOrder = next.Order - 1;
-                }
+                { newOrder = next.Order - 1; }
                 try
                 {
                     long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
@@ -556,11 +580,20 @@ public partial class DashboardPage
                         var moveRes = await _db.MoveItemAsync(dragItem.Id, targetParent, expected);
                         if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
                         expected = moveRes.NewRevision;
+                        // Parent change affects hierarchy; perform a refresh for consistency
+                        await RefreshItemsAsync(true);
+                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        return;
                     }
                     var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
                     if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                    dragItem.Order = newOrder;
+                    // Incremental visible move after current
+                    var curVisIdx = _items.IndexOf(dragItem);
+                    var afterVisIdx = idx2>=0 ? Math.Min(_items.Count-1, idx2+1) : -1;
+                    if(curVisIdx>=0 && afterVisIdx>=0){ _items.RemoveAt(curVisIdx); _items.Insert(afterVisIdx, dragItem); RefreshItemCardStyles(); UpdateStats(); }
+                    else { await RefreshItemsAsync(true); }
                     _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
                 }
                 catch { await RefreshItemsAsync(true); }
             };
@@ -662,7 +695,28 @@ public class ChevronDownVisibilityConverter : IMultiValueConverter
 
     // Child item creation removed per requirement.
     private async Task DeleteItemInlineAsync(ItemVm vm){ var listId=_selectedListId; if(listId==null) return; var expected=await _db.GetListRevisionAsync(listId.Value); var result=await _db.DeleteItemAsync(vm.Id,expected); if(result.Ok){ RemoveLocalSubtree(vm); RebuildVisibleItems(); UpdateCompletedSummary(); _recentLocalMutationUtc=DateTime.UtcNow; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} else await RefreshItemsAsync(true); }
-    private async Task MoveSelectedAsync(int delta){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; var siblings=_allItems.Where(x=>x.ParentId==_selectedItem.ParentId).OrderBy(x=>x.Order).ThenBy(x=>x.Id).ToList(); int idx=siblings.FindIndex(x=>x.Id==_selectedItem.Id); if(idx<0) return; int target=idx+delta; if(target<0||target>=siblings.Count) return; int newOrder = delta<0 ? siblings[target].Order-1 : siblings[target].Order+1; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var res=await _db.SetItemOrderAsync(_selectedItem.Id,newOrder,expected); if(!res.Ok){ await RefreshItemsAsync(true); return;} _selectedItem.Order=newOrder; if(_selectedItem.ParentId!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==_selectedItem.ParentId.Value); parent?.Children.Sort((a,b)=>a.Order.CompareTo(b.Order)); } RebuildVisibleItems(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
+    private async Task MoveSelectedAsync(int delta){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; var siblings=_allItems.Where(x=>x.ParentId==_selectedItem.ParentId).OrderBy(x=>x.Order).ThenBy(x=>x.Id).ToList(); int idx=siblings.FindIndex(x=>x.Id==_selectedItem.Id); if(idx<0) return; int target=idx+delta; if(target<0||target>=siblings.Count) return; int newOrder = delta<0 ? siblings[target].Order-1 : siblings[target].Order+1; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var res=await _db.SetItemOrderAsync(_selectedItem.Id,newOrder,expected); if(!res.Ok){ await RefreshItemsAsync(true); return;} // Update local order
+            _selectedItem.Order=newOrder;
+            // Keep children list ordered
+            if(_selectedItem.ParentId!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==_selectedItem.ParentId.Value); parent?.Children.Sort((a,b)=>a.Order.CompareTo(b.Order)); }
+            // Incremental move in visible list when both positions are visible and same parent
+            var oldVisIdx = _items.IndexOf(_selectedItem);
+            if(oldVisIdx>=0){ // find neighbor to compute new visible index
+                // Determine target visible index by locating the sibling at 'target' if visible
+                var targetSibling = siblings[target];
+                var targetVisIdx = _items.IndexOf(targetSibling);
+                if(targetVisIdx>=0){
+                    // Move selected item before or after target based on delta
+                    int newVisIdx = delta<0 ? targetVisIdx : targetVisIdx+1;
+                    // Clamp within bounds
+                    newVisIdx = Math.Max(0, Math.Min(newVisIdx, _items.Count-1));
+                    if(newVisIdx!=oldVisIdx){ _items.RemoveAt(oldVisIdx); _items.Insert(newVisIdx, _selectedItem); }
+                } else {
+                    // If target sibling not visible (e.g., filtered or collapsed), do minimal list refresh for affected region
+                    // Fallback: leave position; styles and stats still update
+                }
+            }
+            RefreshItemCardStyles(); UpdateStats(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
     private async Task ResetSelectedSubtreeAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var (ok,newRev,affected)=await _db.ResetSubtreeAsync(_selectedItem.Id,expected); if(!ok){ await DisplayAlert("Reset","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return;} void Mark(ItemVm n){ n.IsCompleted=false; n.CompletedAtUtc=null; n.CompletedByUsername=null; foreach(var c in n.Children) Mark(c); n.RecalcState(); } Mark(_selectedItem); RebuildVisibleItems(); UpdateCompletedSummary(); _lastRevision=newRev; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Reset Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} }
     private async Task ToggleItemCompletionInlineAsync(ItemVm vm,bool completed){ if(_selectedListId==null || _userId==null) return; try{ var ok=await _db.SetItemCompletedByUserAsync(vm.Id,_userId.Value,completed); if(!ok){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion","Cannot complete item yet (children incomplete)","OK"); return;} _suppressCompletionEvent=true; vm.IsCompleted=completed; vm.CompletedAtUtc=completed?DateTime.UtcNow:null; vm.CompletedByUsername=completed? _username : null; vm.RecalcState(); _suppressCompletionEvent=false; if(completed){ var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.Children.All(c=>c.IsCompleted)){ parent.IsCompleted=true; parent.CompletedAtUtc=DateTime.UtcNow; parent.CompletedByUsername=_username; parent.RecalcState(); pid=parent.ParentId; } else break; } } else { var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.IsCompleted){ parent.IsCompleted=false; parent.CompletedAtUtc=null; parent.CompletedByUsername=null; parent.RecalcState(); } pid=parent.ParentId; } } if(_hideCompleted && completed){ // incremental removal instead of full rebuild
             for(int i=_items.Count-1;i>=0;i--){ if(_items[i].IsCompleted) _items.RemoveAt(i); }
