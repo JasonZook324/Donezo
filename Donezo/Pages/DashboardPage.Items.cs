@@ -517,10 +517,30 @@ public partial class DashboardPage
             var partialIndicator = new Label { FontAttributes=FontAttributes.Bold, TextColor=Colors.Orange, FontSize=14, WidthRequest=12, HorizontalTextAlignment=TextAlignment.Center, VerticalTextAlignment=TextAlignment.Center }; partialIndicator.SetBinding(Label.TextProperty,"PartialGlyph");
             statusStack.Children.Add(completedInfoLabel); statusStack.Children.Add(check); statusStack.Children.Add(partialIndicator); content.Add(statusStack,3,0);
 
-            // Three-dot menu button
-            var menuBtn = new Button { Text = "?", FontSize = 16, Padding = new Thickness(6,2), Style = (Style)Application.Current!.Resources["OutlinedButton"], HorizontalOptions = LayoutOptions.End };
-            menuBtn.Clicked += async (s, e) => { if (menuBtn.BindingContext is ItemVm vmMenu) await ShowItemMenuAsync(vmMenu, menuBtn); };
-            content.Add(menuBtn,4,0);
+            // Three-dot menu (theme-aware)
+            var menuHost = new Grid { WidthRequest = 32, HeightRequest = 32, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
+            bool isDarkTheme = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app && app.UserAppTheme == AppTheme.Dark);
+            var dotColor = isDarkTheme ? Colors.White : Colors.Black;
+            var vStack = new VerticalStackLayout { Spacing = 4, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, Padding = new Thickness(6,4) };
+            var dot1 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
+            var dot2 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
+            var dot3 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
+            vStack.Children.Add(dot1);
+            vStack.Children.Add(dot2);
+            vStack.Children.Add(dot3);
+            menuHost.Children.Add(vStack);
+            AutomationProperties.SetName(menuHost, "Item menu");
+            var menuTap = new TapGestureRecognizer();
+            menuTap.Tapped += async (s, e) => { if (menuHost.BindingContext is ItemVm vmMenu) await ShowItemMenuAsync(vmMenu, menuHost); };
+            menuHost.GestureRecognizers.Add(menuTap);
+            content.Add(menuHost,4,0);
+            // React to theme changes for this item
+            Application.Current!.RequestedThemeChanged += (_, __) =>
+            {
+                bool darkNow = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app2 && app2.UserAppTheme == AppTheme.Dark);
+                var c = darkNow ? Colors.White : Colors.Black;
+                dot1.Fill = c; dot2.Fill = c; dot3.Fill = c;
+            };
 
             // Put content in middle row of outer grid
             Grid.SetRow(content, 1);
