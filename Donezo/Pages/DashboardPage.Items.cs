@@ -104,6 +104,17 @@ public partial class DashboardPage
             var chevronDown = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M6 9 L12 15 L18 9") };
             chevronDown.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronDownVisibilityConverter() });
             expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown); grid.Add(expandContainer,1,0);
+            // Add tap gesture to toggle expand/collapse
+            var expandTap = new TapGestureRecognizer();
+            expandTap.Tapped += (_, __) => {
+                if (card.BindingContext is ItemVm vm && vm.HasChildren)
+                {
+                    if (vm.IsExpanded) { CollapseIncremental(vm); }
+                    else { ExpandIncremental(vm); }
+                    _expandedStates[vm.Id] = vm.IsExpanded; // persist
+                }
+            };
+            expandContainer.GestureRecognizers.Add(expandTap);
             var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center }; nameLabel.SetBinding(Label.TextProperty, "Name"); nameLabel.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameLabel.SetBinding(IsVisibleProperty, new Binding("IsRenaming", converter:new InvertBoolConverter()));
             var nameEntry = new Entry { HeightRequest=32, FontSize=14 }; nameEntry.SetBinding(Entry.TextProperty, "EditableName", BindingMode.TwoWay); nameEntry.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter())); nameEntry.SetBinding(IsVisibleProperty, "IsRenaming");
             var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry } };
