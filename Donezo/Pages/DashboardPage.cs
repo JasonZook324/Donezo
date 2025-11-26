@@ -365,7 +365,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             }
         };
         _itemsCard = BuildItemsCard();
-        var contentStack = new VerticalStackLayout { Padding = new Thickness(20,10), Spacing = 16, Children = { _listPicker, _itemsCard } };
+        var contentStack = new VerticalStackLayout { Padding = new Thickness(20,10), Spacing = 16, Children = { _itemsCard } };
         _dualHeader = new DualHeaderView { TitleText = "Dashboard", Username = _username };
         _dualHeader.ThemeToggled += async (_, dark) => await OnThemeToggledAsync(dark);
         _dualHeader.LogoutRequested += async (_, __) => await LogoutAsync();
