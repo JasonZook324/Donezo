@@ -55,11 +55,12 @@ public class LevelIndentConverter : IValueConverter
     {
         if (value is int lvl)
         {
-            // Treat levels 1 and 2 as same visual indent so newly added root items (level 1) align with existing roots (level 2)
-            int left = lvl <= 2 ? 16 : (lvl - 1) * 16;
+            // Indent each level progressively so child items are visually distinguishable.
+            // Level 1 (root) = 0px, Level 2 = 20px, Level 3 = 40px, etc.
+            int left = Math.Max(lvl - 1, 0) * 20;
             return new Thickness(left, 0, 0, 0);
         }
-        return new Thickness(16,0,0,0);
+        return new Thickness(0,0,0,0);
     }
     public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
 }
@@ -69,10 +70,11 @@ public class LevelBorderGapConverter : IValueConverter
     {
         if (value is int lvl)
         {
-            int left = lvl <= 2 ? 16 : (lvl - 1) * 16;
+            // Match card (border) left margin with label indent for full-card visual hierarchy.
+            int left = Math.Max(lvl - 1, 0) * 20;
             return new Thickness(left, 2, 0, 0);
         }
-        return new Thickness(16,2,0,0);
+        return new Thickness(0,2,0,0);
     }
     public object? ConvertBack(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture) => throw new NotImplementedException();
 }
@@ -590,7 +592,9 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             it.IsSelected = false;
         _selectedItem = vm;
         if (vm != null)
+        {
             vm.IsSelected = true;
+        }
         UpdateMoveButtons();
     }
     private void ClearSelectionAndUi()
