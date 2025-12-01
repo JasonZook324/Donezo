@@ -234,6 +234,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     // Add missing fields near other item panel fields
     private Button _openNewItemButton = null!; // trigger button (defined in items card)
     private DateTime _recentLocalMutationUtc; // track last local mutation for polling suppression
+    private Button _resetListButton = null!; // new reset list button
 
     // Removed child item support (entries/buttons) per requirement.
 
@@ -368,6 +369,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
                 await RunBusy(async () => { _selectedListId = sl.Id; await RefreshItemsAsync(true); }, "Loading items...");
                 StartRevisionPolling();
             }
+            UpdateActionButtons();
         };
         _itemsCard = BuildItemsCard();
         var contentStack = new VerticalStackLayout { Padding = new Thickness(20,10), Spacing = 16, Children = { _itemsCard } };
@@ -568,6 +570,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             }
             else if (combined.Count > 0)
             { _listPicker.SelectedIndex = 0; }
+            UpdateActionButtons();
         }, "Loading lists...");
     }
 
@@ -638,6 +641,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     public bool CanCompleteItems() => CanModifyItems();
     public bool CanResetSubtree() => CanModifyItems();
     public bool CanDragItems() => CanModifyItems();
+    public bool CanResetList() => CanModifyItems();
     private async Task ShowViewerBlockedAsync(string action)
     { try { await DisplayAlert("View Only", $"Your role (Viewer) does not permit {action}.", "OK"); } catch { } }
     private void UpdateMoveButtons()
@@ -778,5 +782,13 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         if (_userId != null && _selectedListId != null)
         { try { await _db.SetListHideCompletedAsync(_userId.Value, _selectedListId.Value, value); } catch { } }
         RebuildVisibleItems();
+    }
+
+    private void UpdateActionButtons()
+    {
+        if (_resetListButton != null)
+            _resetListButton.IsEnabled = CanResetList() && _selectedListId != null;
+        if (_openNewItemButton != null)
+            _openNewItemButton.IsEnabled = CanAddItems() && _selectedListId != null;
     }
 }
