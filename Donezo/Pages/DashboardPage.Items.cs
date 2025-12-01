@@ -253,426 +253,441 @@ public partial class DashboardPage
         return isDark ? darkFallback : lightFallback;
     }
 
+    private Geometry? SafePathGeometry(string data)
+    {
+        try
+        {
+            return (Geometry)new PathGeometryConverter().ConvertFromInvariantString(data);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private DataTemplate CreateItemTemplate()
     {
         return new DataTemplate(() =>
         {
-            var card = new Border { StrokeThickness=1, StrokeShape=new RoundRectangle { CornerRadius=new CornerRadius(18)}, Padding=new Thickness(12,10)};
-            card.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelBorderGapConverter()));
-
-            // Grid with top indicator, content, bottom indicator
-            var grid = new Grid
+            try
             {
-                Padding=new Thickness(4,2),
-                RowDefinitions = new RowDefinitionCollection
+                var card = new Border { StrokeThickness=1, StrokeShape=new RoundRectangle { CornerRadius=new CornerRadius(18)}, Padding=new Thickness(12,10)};
+                card.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelBorderGapConverter()));
+
+                var grid = new Grid
                 {
-                    new RowDefinition(GridLength.Auto),
-                    new RowDefinition(GridLength.Auto),
-                    new RowDefinition(GridLength.Auto)
-                }
-            };
-
-            // Drop position indicators
-            var topIndicator = new BoxView { HeightRequest = 2, BackgroundColor = (Color)Application.Current!.Resources["Primary"], Opacity = 0.9, IsVisible = false };
-            var bottomIndicator = new BoxView { HeightRequest = 2, BackgroundColor = (Color)Application.Current!.Resources["Primary"], Opacity = 0.9, IsVisible = false };
-            grid.Add(topIndicator, 0, 0);
-            grid.Add(bottomIndicator, 0, 2);
-
-            // Transparent hit areas to detect drag-over (spanning entire card)
-            var topHit = new BoxView { HeightRequest = 18, BackgroundColor = Colors.Transparent, Opacity = 0.01, InputTransparent = false };
-            var bottomHit = new BoxView { HeightRequest = 18, BackgroundColor = Colors.Transparent, Opacity = 0.01, InputTransparent = false };
-            grid.Add(topHit, 0, 0);
-            grid.Add(bottomHit, 0, 2);
-
-            // Content row container
-            var content = new Grid { ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(new GridLength(28)), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
-
-            // Drag handle (small grip to avoid scroll conflicts on Android)
-            var dragHandle = new Grid { WidthRequest = 24, HeightRequest = 24, Padding = new Thickness(4), HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
-            var gripColor = GetThemeColor("Gray400", "Gray700", Color.FromArgb("#BDBDBD"), Color.FromArgb("#616161"));
-            var gripDot1 = new Ellipse { WidthRequest = 4, HeightRequest = 4, Fill = gripColor, Margin = new Thickness(0,0,0,2) };
-            var gripDot2 = new Ellipse { WidthRequest = 4, HeightRequest = 4, Fill = gripColor, Margin = new Thickness(0,2,0,0) };
-            var gripStack = new VerticalStackLayout { Spacing = 0, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
-            gripStack.Children.Add(gripDot1); gripStack.Children.Add(gripDot2);
-            dragHandle.Children.Add(gripStack);
-
-            // Expand chevrons
-            var expandContainer = new Grid { WidthRequest=28, HeightRequest=28 };
-            expandContainer.Triggers.Add(new DataTrigger(typeof(Grid))
-            {
-                Binding = new Binding("HasChildren"),
-                Value = false,
-                Setters = { new Setter { Property = Grid.WidthRequestProperty, Value = 0 } }
-            });
-
-            var chevronRight = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M8 6 L16 12 L8 18") };
-            chevronRight.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronRightVisibilityConverter() });
-            var chevronDown = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=(Geometry)new PathGeometryConverter().ConvertFromInvariantString("M6 9 L12 15 L18 9") };
-            chevronDown.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronDownVisibilityConverter() });
-            expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown);
-            var expandTap = new TapGestureRecognizer();
-            expandTap.Tapped += (_, __) => {
-                if (card.BindingContext is ItemVm vm && vm.HasChildren)
-                {
-                    if (vm.IsExpanded) { CollapseIncremental(vm); }
-                    else { ExpandIncremental(vm); }
-                    _expandedStates[vm.Id] = vm.IsExpanded; // persist
-                }
-            };
-            expandContainer.GestureRecognizers.Add(expandTap);
-
-            // Checkbox (left)
-            var check = new CheckBox { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
-            check.SetBinding(CheckBox.IsCheckedProperty,"IsCompleted");
-            check.CheckedChanged += async (_,e)=>{ if (_suppressCompletionEvent) return; if (!CanCompleteItems()){ _suppressCompletionEvent=true; if (check.BindingContext is ItemVm vmPrior){ var prior=!e.Value; vmPrior.IsCompleted=prior; check.IsChecked=prior; } _suppressCompletionEvent=false; await ShowViewerBlockedAsync("changing completion state"); return; } if (check.BindingContext is ItemVm vmC) await ToggleItemCompletionInlineAsync(vmC, e.Value); }; check.IsEnabled = CanCompleteItems();
-
-            // Name
-            var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center, FontSize = 18 };
-            nameLabel.SetBinding(Label.TextProperty, "Name");
-            nameLabel.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter()));
-            nameLabel.SetBinding(IsVisibleProperty, new Binding("IsRenaming", converter:new InvertBoolConverter()));
-            var nameEntry = new Entry { HeightRequest=32, FontSize=14 };
-            nameEntry.SetBinding(Entry.TextProperty, "EditableName", BindingMode.TwoWay);
-            nameEntry.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter()));
-            nameEntry.SetBinding(IsVisibleProperty, "IsRenaming");
-            nameEntry.Completed += async (_, __) => { if (card.BindingContext is ItemVm vmComp && vmComp.IsRenaming) await CommitRenameAsync(vmComp); };
-            nameEntry.Unfocused += async (_, __) => { if (card.BindingContext is ItemVm vmUnf && vmUnf.IsRenaming) await CommitRenameAsync(vmUnf); };
-            nameEntry.PropertyChanged += (_, pe) => { if (pe.PropertyName == nameof(Entry.IsVisible) && nameEntry.IsVisible) Device.BeginInvokeOnMainThread(() => nameEntry.Focus()); };
-            var inlineSaveBtn = new Button { Text = "Save", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
-            inlineSaveBtn.SetBinding(IsVisibleProperty, "IsRenaming");
-            inlineSaveBtn.Clicked += async (_, __) => { if (inlineSaveBtn.BindingContext is ItemVm vmSave && vmSave.IsRenaming) await CommitRenameAsync(vmSave); };
-            var inlineCancelBtn = new Button { Text = "Cancel", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
-            inlineCancelBtn.SetBinding(IsVisibleProperty, "IsRenaming");
-            inlineCancelBtn.Clicked += (_, __) => { if (inlineCancelBtn.BindingContext is ItemVm vmCancel) { vmCancel.IsRenaming = false; vmCancel.EditableName = vmCancel.Name; } };
-            var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry, inlineSaveBtn, inlineCancelBtn } };
-            // Shift for leaf nodes (no expand chevron)
-            nameContainer.Triggers.Add(new DataTrigger(typeof(HorizontalStackLayout))
-            {
-                Binding = new Binding("HasChildren"),
-                Value = false,
-                Setters = { new Setter { Property = View.TranslationXProperty, Value = -20 } }
-            });
-
-            // Completed info (right, green, two lines)
-            var completedInfoLabel = new Label { FontSize=12, TextColor=Color.FromArgb("#008A2E"), FontAttributes=FontAttributes.Italic, LineBreakMode=LineBreakMode.TailTruncation, VerticalTextAlignment=TextAlignment.Center, HorizontalTextAlignment = TextAlignment.End };
-            completedInfoLabel.SetBinding(Label.TextProperty,"CompletedInfo");
-            completedInfoLabel.SetBinding(Label.IsVisibleProperty,"ShowCompletedInfo");
-
-            // Three-dot menu
-            var menuHost = new Grid { WidthRequest = 32, HeightRequest = 32, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
-            bool isDarkTheme = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app2Theme && app2Theme.UserAppTheme == AppTheme.Dark);
-            var dotColor = isDarkTheme ? Colors.White : Colors.Black;
-            var vStack = new VerticalStackLayout { Spacing = 4, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, Padding = new Thickness(6,4) };
-            var dot1 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
-            var dot2 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
-            var dot3 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
-            vStack.Children.Add(dot1); vStack.Children.Add(dot2); vStack.Children.Add(dot3);
-            menuHost.Children.Add(vStack);
-            AutomationProperties.SetName(menuHost, "Item menu");
-            var menuTap = new TapGestureRecognizer();
-            menuTap.Tapped += async (s, e) => { if (menuHost.BindingContext is ItemVm vmMenu) await ShowItemMenuAsync(vmMenu, menuHost); };
-            menuHost.GestureRecognizers.Add(menuTap);
-            Application.Current!.RequestedThemeChanged += (_, __) =>
-            {
-                bool darkNow = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app3 && app3.UserAppTheme == AppTheme.Dark);
-                var c = darkNow ? Colors.White : Colors.Black;
-                dot1.Fill = c; dot2.Fill = c; dot3.Fill = c;
-            };
-
-            // Drag & selection gestures
-            void OnDragStarting(object? s, DragStartingEventArgs e){ if (!CanDragItems()) return; if (card.BindingContext is ItemVm vm){ _holdCts?.Cancel(); vm.IsPreDrag=false; SetSingleSelection(vm); _dragGestureActive=true; vm.IsDragging=true; ApplyItemCardStyle(card,vm); _dragItem=vm; _pendingDragVm=vm; try{ e.Data.Properties["ItemId"] = vm.Id;}catch{} 
-                // Ensure non-empty data properties to satisfy platform requirements without using unavailable APIs
-                try { e.Data.Properties["Payload"] = vm.Name ?? vm.Id.ToString(); } catch { }
-            } }
-            var drag = new DragGestureRecognizer{ CanDrag=true };
-            drag.DragStarting += OnDragStarting;
-            drag.DropCompleted += (_, __) => { 
-                if (card.BindingContext is ItemVm vmDone) { vmDone.IsDragging=false; ApplyItemCardStyle(card, vmDone); }
-                _dragItem=null; _pendingDragVm=null; _dragDropCompleted=true; _dragGestureActive=false; 
-                topIndicator.IsVisible=false; bottomIndicator.IsVisible=false; 
-                if (card.BindingContext is ItemVm vmRestore)
-                {
-                    ApplyItemCardStyle(card, vmRestore);
-                }
-            } ;
-            dragHandle.GestureRecognizers.Add(drag);
-
-            var contentDrop = new DropGestureRecognizer { AllowDrop = true };
-            bool contentHovering = false;
-            CancellationTokenSource? hoverExpandCts = null;
-            contentDrop.DragOver += (s, e) =>
-            {
-                if (!CanDragItems()) return; if (_dragItem == null) return;
-                contentHovering = true;
-                if (card.BindingContext is ItemVm target)
-                {
-                    bool prohibited = WouldExceedDepth(_dragItem, target.Level + 1);
-                    var primary = (Color)Application.Current!.Resources["Primary"];
-                    var danger = Colors.Red;
-                    card.BackgroundColor = prohibited ? danger.WithAlpha(0.10f) : primary.WithAlpha(0.10f);
-                    card.Stroke = prohibited ? danger : primary;
-                }
-                if (card.BindingContext is ItemVm target2 && target2.HasChildren && !target2.IsExpanded)
-                {
-                    hoverExpandCts?.Cancel();
-                    hoverExpandCts = new CancellationTokenSource();
-                    var cts = hoverExpandCts;
-                    Device.StartTimer(TimeSpan.FromMilliseconds(220), () =>
+                    Padding=new Thickness(4,2),
+                    RowDefinitions = new RowDefinitionCollection
                     {
-                        if (cts!.IsCancellationRequested) return false;
-                        if (!contentHovering) return false;
-                        target2.IsExpanded = true;
-                        ExpandIncremental(target2);
-                        _expandedStates[target2.Id] = true;
+                        new RowDefinition(GridLength.Auto),
+                        new RowDefinition(GridLength.Auto),
+                        new RowDefinition(GridLength.Auto),
+                        new RowDefinition(GridLength.Auto)
+                    }
+                };
+
+                var topIndicator = new BoxView { HeightRequest = 2, BackgroundColor = (Color)Application.Current!.Resources["Primary"], Opacity = 0.9, IsVisible = false };
+                var bottomIndicator = new BoxView { HeightRequest = 2, BackgroundColor = (Color)Application.Current!.Resources["Primary"], Opacity = 0.9, IsVisible = false };
+                grid.Add(topIndicator, 0, 0);
+                grid.Add(bottomIndicator, 0, 3);
+
+                var topHit = new BoxView { HeightRequest = 18, BackgroundColor = Colors.Transparent, Opacity = 0.01, InputTransparent = false };
+                var bottomHit = new BoxView { HeightRequest = 18, BackgroundColor = Colors.Transparent, Opacity = 0.01, InputTransparent = false };
+                grid.Add(topHit, 0, 0);
+                grid.Add(bottomHit, 0, 3);
+
+                var content = new Grid { ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(new GridLength(28)), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
+
+                var dragHandle = new Grid { WidthRequest = 24, HeightRequest = 24, Padding = new Thickness(4), HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+                var gripColor = GetThemeColor("Gray400", "Gray700", Color.FromArgb("#BDBDBD"), Color.FromArgb("#616161"));
+                var gripDot1 = new Ellipse { WidthRequest = 4, HeightRequest = 4, Fill = gripColor, Margin = new Thickness(0,0,0,2) };
+                var gripDot2 = new Ellipse { WidthRequest = 4, HeightRequest = 4, Fill = gripColor, Margin = new Thickness(0,2,0,0) };
+                var gripStack = new VerticalStackLayout { Spacing = 0, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+                gripStack.Children.Add(gripDot1); gripStack.Children.Add(gripDot2);
+                dragHandle.Children.Add(gripStack);
+
+                var expandContainer = new Grid { WidthRequest=28, HeightRequest=28 };
+                expandContainer.Triggers.Add(new DataTrigger(typeof(Grid))
+                {
+                    Binding = new Binding("HasChildren"),
+                    Value = false,
+                    Setters = { new Setter { Property = Grid.WidthRequestProperty, Value = 0 } }
+                });
+
+                var rightGeom = SafePathGeometry("M8 6 L16 12 L8 18");
+                var downGeom = SafePathGeometry("M6 9 L12 15 L18 9");
+                View chevronRight;
+                View chevronDown;
+                if (rightGeom != null && downGeom != null)
+                {
+                    chevronRight = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=rightGeom };
+                    chevronRight.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronRightVisibilityConverter() });
+                    chevronDown = new Microsoft.Maui.Controls.Shapes.Path { Stroke=new SolidColorBrush((Color)Application.Current!.Resources["Primary"]), StrokeThickness=2, HorizontalOptions=LayoutOptions.Center, VerticalOptions=LayoutOptions.Center, Data=downGeom };
+                    chevronDown.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronDownVisibilityConverter() });
+                }
+                else
+                {
+                    chevronRight = new BoxView { WidthRequest=12, HeightRequest=12, BackgroundColor=(Color)Application.Current!.Resources["Primary"], CornerRadius=2, IsVisible=true };
+                    chevronDown = new BoxView { WidthRequest=12, HeightRequest=2, BackgroundColor=(Color)Application.Current!.Resources["Primary"], IsVisible=false };
+                    chevronRight.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronRightVisibilityConverter() });
+                    chevronDown.SetBinding(IsVisibleProperty, new MultiBinding { Bindings = { new Binding("HasChildren"), new Binding("IsExpanded") }, Converter = new ChevronDownVisibilityConverter() });
+                }
+                expandContainer.Children.Add(chevronRight); expandContainer.Children.Add(chevronDown);
+                var expandTap = new TapGestureRecognizer();
+                expandTap.Tapped += (_, __) => {
+                    if (card.BindingContext is ItemVm vm && vm.HasChildren)
+                    {
+                        if (vm.IsExpanded) { CollapseIncremental(vm); }
+                        else { ExpandIncremental(vm); }
+                        _expandedStates[vm.Id] = vm.IsExpanded;
+                    }
+                };
+                expandContainer.GestureRecognizers.Add(expandTap);
+
+                var check = new CheckBox { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+                check.SetBinding(CheckBox.IsCheckedProperty,"IsCompleted");
+                check.CheckedChanged += async (_,e)=>{ if (_suppressCompletionEvent) return; if (!CanCompleteItems()){ _suppressCompletionEvent=true; if (check.BindingContext is ItemVm vmPrior){ var prior=!e.Value; vmPrior.IsCompleted=prior; check.IsChecked=prior; } _suppressCompletionEvent=false; await ShowViewerBlockedAsync("changing completion state"); return; } if (check.BindingContext is ItemVm vmC) await ToggleItemCompletionInlineAsync(vmC, e.Value); }; check.IsEnabled = CanCompleteItems();
+
+                var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center, FontSize = 18 };
+                nameLabel.SetBinding(Label.TextProperty, "Name");
+                nameLabel.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter()));
+                nameLabel.SetBinding(IsVisibleProperty, new Binding("IsRenaming", converter:new InvertBoolConverter()));
+                var nameEntry = new Entry { HeightRequest=32, FontSize=14 };
+                nameEntry.SetBinding(Entry.TextProperty, "EditableName", BindingMode.TwoWay);
+                nameEntry.SetBinding(View.MarginProperty, new Binding("Level", converter:new LevelIndentConverter()));
+                nameEntry.SetBinding(IsVisibleProperty, "IsRenaming");
+                nameEntry.Completed += async (_, __) => { if (card.BindingContext is ItemVm vmComp && vmComp.IsRenaming) await CommitRenameAsync(vmComp); };
+                nameEntry.Unfocused += async (_, __) => { if (card.BindingContext is ItemVm vmUnf && vmUnf.IsRenaming) await CommitRenameAsync(vmUnf); };
+                nameEntry.PropertyChanged += (_, pe) => { if (pe.PropertyName == nameof(Entry.IsVisible) && nameEntry.IsVisible) Device.BeginInvokeOnMainThread(() => nameEntry.Focus()); };
+                var inlineSaveBtn = new Button { Text = "Save", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
+                inlineSaveBtn.SetBinding(IsVisibleProperty, "IsRenaming");
+                inlineSaveBtn.Clicked += async (_, __) => { if (inlineSaveBtn.BindingContext is ItemVm vmSave && vmSave.IsRenaming) await CommitRenameAsync(vmSave); };
+                var inlineCancelBtn = new Button { Text = "Cancel", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
+                inlineCancelBtn.SetBinding(IsVisibleProperty, "IsRenaming");
+                inlineCancelBtn.Clicked += (_, __) => { if (inlineCancelBtn.BindingContext is ItemVm vmCancel) { vmCancel.IsRenaming = false; vmCancel.EditableName = vmCancel.Name; } };
+                var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry, inlineSaveBtn, inlineCancelBtn } };
+                nameContainer.Triggers.Add(new DataTrigger(typeof(HorizontalStackLayout))
+                {
+                    Binding = new Binding("HasChildren"),
+                    Value = false,
+                    Setters = { new Setter { Property = View.TranslationXProperty, Value = -20 } }
+                });
+
+                var completedInfoLabel = new Label { FontSize=12, TextColor=Color.FromArgb("#008A2E"), FontAttributes=FontAttributes.Italic, LineBreakMode=LineBreakMode.NoWrap, HorizontalOptions = LayoutOptions.Fill, VerticalTextAlignment=TextAlignment.Center, HorizontalTextAlignment = TextAlignment.Center };
+                completedInfoLabel.SetBinding(Label.IsVisibleProperty,"ShowCompletedInfo");
+                // Bind both username and timestamp
+                completedInfoLabel.SetBinding(Label.TextProperty, new MultiBinding
+                {
+                    Bindings =
+                    {
+                        new Binding("CompletedByUsername"),
+                        new Binding("CompletedAtUtc")
+                    },
+                    Converter = new CompletedInfoConverter()
+                });
+
+                var menuHost = new Grid { WidthRequest = 32, HeightRequest = 32, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
+                bool isDarkTheme = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app2Theme && app2Theme.UserAppTheme == AppTheme.Dark);
+                var dotColor = isDarkTheme ? Colors.White : Colors.Black;
+                var vStack = new VerticalStackLayout { Spacing = 4, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, Padding = new Thickness(6,4) };
+                var dot1 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
+                var dot2 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
+                var dot3 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
+                vStack.Children.Add(dot1); vStack.Children.Add(dot2); vStack.Children.Add(dot3);
+                menuHost.Children.Add(vStack);
+                AutomationProperties.SetName(menuHost, "Item menu");
+                var menuTap = new TapGestureRecognizer();
+                menuTap.Tapped += async (s, e) => { if (menuHost.BindingContext is ItemVm vmMenu) await ShowItemMenuAsync(vmMenu, menuHost); };
+                menuHost.GestureRecognizers.Add(menuTap);
+                Application.Current!.RequestedThemeChanged += (_, __) =>
+                {
+                    bool darkNow = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app3 && app3.UserAppTheme == AppTheme.Dark);
+                    var c = darkNow ? Colors.White : Colors.Black;
+                    dot1.Fill = c; dot2.Fill = c; dot3.Fill = c;
+                };
+
+                void OnDragStarting(object? s, DragStartingEventArgs e){ if (!CanDragItems()) return; if (card.BindingContext is ItemVm vm){ _holdCts?.Cancel(); vm.IsPreDrag=false; SetSingleSelection(vm); _dragGestureActive=true; vm.IsDragging=true; ApplyItemCardStyle(card,vm); _dragItem=vm; _pendingDragVm=vm; try{ e.Data.Properties["ItemId"] = vm.Id;}catch{} try { e.Data.Properties["Payload"] = vm.Name ?? vm.Id.ToString(); } catch { } } }
+                var drag = new DragGestureRecognizer{ CanDrag=true };
+                drag.DragStarting += OnDragStarting;
+                drag.DropCompleted += (_, __) => { if (card.BindingContext is ItemVm vmDone) { vmDone.IsDragging=false; ApplyItemCardStyle(card, vmDone); } _dragItem=null; _pendingDragVm=null; _dragDropCompleted=true; _dragGestureActive=false; topIndicator.IsVisible=false; bottomIndicator.IsVisible=false; if (card.BindingContext is ItemVm vmRestore) { ApplyItemCardStyle(card, vmRestore); } } ;
+                dragHandle.GestureRecognizers.Add(drag);
+
+                var contentDrop = new DropGestureRecognizer { AllowDrop = true };
+                bool contentHovering = false;
+                CancellationTokenSource? hoverExpandCts = null;
+                contentDrop.DragOver += (s, e) =>
+                {
+                    if (!CanDragItems()) return; if (_dragItem == null) return;
+                    contentHovering = true;
+                    if (card.BindingContext is ItemVm target)
+                    {
+                        bool prohibited = WouldExceedDepth(_dragItem, target.Level + 1);
+                        var primary = (Color)Application.Current!.Resources["Primary"];
+                        var danger = Colors.Red;
+                        card.BackgroundColor = prohibited ? danger.WithAlpha(0.10f) : primary.WithAlpha(0.10f);
+                        card.Stroke = prohibited ? danger : primary;
+                    }
+                    if (card.BindingContext is ItemVm target2 && target2.HasChildren && !target2.IsExpanded)
+                    {
+                        hoverExpandCts?.Cancel();
+                        hoverExpandCts = new CancellationTokenSource();
+                        var cts = hoverExpandCts;
+                        Device.StartTimer(TimeSpan.FromMilliseconds(220), () =>
+                        {
+                            if (cts!.IsCancellationRequested) return false;
+                            if (!contentHovering) return false;
+                            target2.IsExpanded = true;
+                            ExpandIncremental(target2);
+                            _expandedStates[target2.Id] = true;
+                            return false;
+                        });
+                    }
+                };
+                contentDrop.DragLeave += (s, e) =>
+                {
+                    contentHovering = false;
+                    hoverExpandCts?.Cancel();
+                    if (card.BindingContext is ItemVm vmLeave)
+                    {
+                        ApplyItemCardStyle(card, vmLeave);
+                    }
+                };
+                contentDrop.Drop += async (s, e) =>
+                {
+                    if (!CanDragItems()) return; if (_selectedListId == null) return;
+                    var dragItem = _dragItem; if (dragItem == null) return; if (card.BindingContext is not ItemVm target) return; if (target.Id == dragItem.Id) return; if (WouldExceedDepth(dragItem, target.Level + 1)) { await card.FadeTo(0.6, 90); await card.FadeTo(1.0, 90); return; }
+                    int newOrder = 0; var targetChildren = _allItems.Where(x => x.ParentId == target.Id).OrderBy(x => x.Order).ToList(); newOrder = targetChildren.Count > 0 ? targetChildren.Last().Order + 1 : 1;
+                    try
+                    {
+                        long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
+                        var moveRes = await _db.MoveItemAsync(dragItem.Id, target.Id, expected);
+                        if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
+                        expected = moveRes.NewRevision;
+                        var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
+                        if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                        _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                        await RefreshItemsAsync(true);
+                    }
+                    catch { await RefreshItemsAsync(true); }
+                };
+                grid.GestureRecognizers.Add(contentDrop);
+
+                var topDrop = new DropGestureRecognizer { AllowDrop = true };
+                var bottomDrop = new DropGestureRecognizer { AllowDrop = true };
+                topDrop.DragOver += (s, e) =>
+                {
+                    if (!CanDragItems()) return; if (_dragItem == null) { topIndicator.IsVisible=false; return; }
+                    if (card.BindingContext is not ItemVm target) { topIndicator.IsVisible=false; return; }
+                    if (target.Id == _dragItem.Id) { topIndicator.IsVisible=false; return; }
+                    if (IsUnder(_dragItem, target)) { topIndicator.IsVisible=false; return; }
+                    topIndicator.IsVisible = true; bottomIndicator.IsVisible = false;
+                    var primary = (Color)Application.Current!.Resources["Primary"]; card.BackgroundColor = primary.WithAlpha(0.06f);
+                };
+                topDrop.DragLeave += (s, e) => { topIndicator.IsVisible=false; if (card.BindingContext is ItemVm vmLeave2) ApplyItemCardStyle(card, vmLeave2); };
+                topDrop.Drop += async (s, e) =>
+                {
+                    topIndicator.IsVisible=false; bottomIndicator.IsVisible=false;
+                    if (!CanDragItems()) return; if (_selectedListId == null) return;
+                    var dragItem = _dragItem; if (dragItem == null) return;
+                    if (card.BindingContext is not ItemVm target) return; if (target.Id == dragItem.Id) return; if (IsUnder(dragItem, target)) return;
+                    int newOrder = target.Order - 1;
+                    try
+                    {
+                        long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
+                        if (dragItem.ParentId != target.ParentId)
+                        {
+                            var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
+                            if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
+                            expected = moveRes.NewRevision;
+                            await RefreshItemsAsync(true);
+                            _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                            return;
+                        }
+                        var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
+                        if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                        dragItem.Order = newOrder;
+                        var currentVisIdx = _items.IndexOf(dragItem);
+                        var targetVisIdx = _items.IndexOf(target);
+                        if(currentVisIdx>=0 && targetVisIdx>=0){
+                            int newVisIdx = Math.Max(0, targetVisIdx);
+                            if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
+                            RefreshItemCardStyles(); UpdateStats();
+                        } else {
+                            await RefreshItemsAsync(true);
+                        }
+                        _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                    }
+                    catch { await RefreshItemsAsync(true); }
+                };
+                bottomDrop.DragOver += (s, e) =>
+                {
+                    if (!CanDragItems()) return; if (_dragItem == null) { bottomIndicator.IsVisible=false; return; }
+                    if (card.BindingContext is not ItemVm target) { bottomIndicator.IsVisible=false; return; }
+                    if (target.Id == _dragItem.Id) { bottomIndicator.IsVisible=false; return; }
+                    if (IsUnder(_dragItem, target)) { bottomIndicator.IsVisible=false; return; }
+                    topIndicator.IsVisible = false; bottomIndicator.IsVisible = true;
+                    var primary = (Color)Application.Current!.Resources["Primary"]; card.BackgroundColor = primary.WithAlpha(0.06f);
+                };
+                bottomDrop.DragLeave += (s, e) => { bottomIndicator.IsVisible=false; if (card.BindingContext is ItemVm vmLeave3) ApplyItemCardStyle(card, vmLeave3); };
+                bottomDrop.Drop += async (s, e) =>
+                {
+                    topIndicator.IsVisible=false; bottomIndicator.IsVisible=false;
+                    if (!CanDragItems()) return; if (_selectedListId == null) return;
+                    var dragItem = _dragItem; if (dragItem == null) return;
+                    if (card.BindingContext is not ItemVm target) return; if (target.Id == dragItem.Id) return; if (IsUnder(dragItem, target)) return;
+                    int newOrder = target.Order + 1;
+                    try
+                    {
+                        long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
+                        if (dragItem.ParentId != target.ParentId)
+                        {
+                            var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
+                            if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
+                            expected = moveRes.NewRevision;
+                            await RefreshItemsAsync(true);
+                            _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                            return;
+                        }
+                        var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
+                        if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                        dragItem.Order = newOrder;
+                        var currentVisIdx = _items.IndexOf(dragItem);
+                        var targetVisIdx = _items.IndexOf(target);
+                        if(currentVisIdx>=0 && targetVisIdx>=0){
+                            int newVisIdx = Math.Min(_items.Count-1, targetVisIdx+1);
+                            if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
+                            RefreshItemCardStyles(); UpdateStats();
+                        } else {
+                            await RefreshItemsAsync(true);
+                        }
+                        _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                    }
+                    catch { await RefreshItemsAsync(true); }
+                };
+
+                var pointer = new PointerGestureRecognizer();
+                pointer.PointerPressed += (_, __) =>
+                {
+                    if (card.BindingContext is not ItemVm vm || !CanDragItems()) return;
+                    _holdCts?.Cancel();
+                    _holdItem = vm;
+                    var cts = new CancellationTokenSource();
+                    _holdCts = cts;
+                    Device.StartTimer(TimeSpan.FromMilliseconds(160), () =>
+                    {
+                        if (cts.IsCancellationRequested) return false;
+                        if (_dragGestureActive) return false;
+                        SetSingleSelection(vm);
+                        vm.IsPreDrag = true;
+                        vm.IsDragging = true;
+                        ApplyItemCardStyle(card, vm);
                         return false;
                     });
-                }
-            };
-            contentDrop.DragLeave += (s, e) =>
-            {
-                contentHovering = false;
-                hoverExpandCts?.Cancel();
-                if (card.BindingContext is ItemVm vmLeave)
+                };
+                pointer.PointerReleased += (_, __) =>
                 {
-                    ApplyItemCardStyle(card, vmLeave);
-                }
-            };
-            // Drop ON card makes dragged item a child
-            contentDrop.Drop += async (s, e) =>
-            {
-                if (!CanDragItems()) return; if (_selectedListId == null) return;
-                var dragItem = _dragItem; if (dragItem == null) return; if (card.BindingContext is not ItemVm target) return; if (target.Id == dragItem.Id) return; if (WouldExceedDepth(dragItem, target.Level + 1)) { await card.FadeTo(0.6, 90); await card.FadeTo(1.0, 90); return; }
-                int newOrder = 0; var targetChildren = _allItems.Where(x => x.ParentId == target.Id).OrderBy(x => x.Order).ToList(); newOrder = targetChildren.Count > 0 ? targetChildren.Last().Order + 1 : 1;
-                try
-                {
-                    long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
-                    var moveRes = await _db.MoveItemAsync(dragItem.Id, target.Id, expected);
-                    if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
-                    expected = moveRes.NewRevision;
-                    var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
-                    if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
-                    _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                    await RefreshItemsAsync(true);
-                }
-                catch { await RefreshItemsAsync(true); }
-            };
-            grid.GestureRecognizers.Add(contentDrop);
-
-            // Top & Bottom drop zones
-            var topDrop = new DropGestureRecognizer { AllowDrop = true };
-            topDrop.DragOver += (s, e) =>
-            {
-                if (!CanDragItems()) return; if (_dragItem == null) { topIndicator.IsVisible=false; return; }
-                if (card.BindingContext is not ItemVm target) { topIndicator.IsVisible=false; return; }
-                if (target.Id == _dragItem.Id) { topIndicator.IsVisible=false; return; }
-                if (IsUnder(_dragItem, target)) { topIndicator.IsVisible=false; return; }
-                topIndicator.IsVisible = true; bottomIndicator.IsVisible = false;
-                var primary = (Color)Application.Current!.Resources["Primary"]; card.BackgroundColor = primary.WithAlpha(0.06f);
-            };
-            topDrop.DragLeave += (s, e) => { topIndicator.IsVisible=false; if (card.BindingContext is ItemVm vmLeave2) ApplyItemCardStyle(card, vmLeave2); };
-            topDrop.Drop += async (s, e) =>
-            {
-                topIndicator.IsVisible=false; bottomIndicator.IsVisible=false;
-                if (!CanDragItems()) return; if (_selectedListId == null) return;
-                var dragItem = _dragItem; if (dragItem == null) return;
-                if (card.BindingContext is not ItemVm target) return; if (target.Id == dragItem.Id) return; if (IsUnder(dragItem, target)) return;
-                int newOrder = target.Order - 1;
-                try
-                {
-                    long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
-                    if (dragItem.ParentId != target.ParentId)
+                    if (card.BindingContext is not ItemVm vm) return;
+                    _holdCts?.Cancel();
+                    if (!_dragGestureActive && vm.IsDragging)
                     {
-                        var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
-                        if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
-                        expected = moveRes.NewRevision;
-                        await RefreshItemsAsync(true);
-                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                        return;
+                        vm.IsDragging = false;
+                        vm.IsPreDrag = false;
+                        ApplyItemCardStyle(card, vm);
                     }
-                    var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
-                    if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
-                    dragItem.Order = newOrder;
-                    var currentVisIdx = _items.IndexOf(dragItem);
-                    var targetVisIdx = _items.IndexOf(target);
-                    if(currentVisIdx>=0 && targetVisIdx>=0){
-                        int newVisIdx = Math.Max(0, targetVisIdx);
-                        if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
-                        RefreshItemCardStyles(); UpdateStats();
-                    } else {
-                        await RefreshItemsAsync(true);
-                    }
-                    _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                }
-                catch { await RefreshItemsAsync(true); }
-            };
-            topHit.GestureRecognizers.Add(topDrop);
+                };
+                card.GestureRecognizers.Add(pointer);
 
-            var bottomDrop = new DropGestureRecognizer { AllowDrop = true };
-            bottomDrop.DragOver += (s, e) =>
-            {
-                if (!CanDragItems()) return; if (_dragItem == null) { bottomIndicator.IsVisible=false; return; }
-                if (card.BindingContext is not ItemVm target) { bottomIndicator.IsVisible=false; return; }
-                if (target.Id == _dragItem.Id) { bottomIndicator.IsVisible=false; return; }
-                if (IsUnder(_dragItem, target)) { bottomIndicator.IsVisible=false; return; }
-                topIndicator.IsVisible = false; bottomIndicator.IsVisible = true;
-                var primary = (Color)Application.Current!.Resources["Primary"]; card.BackgroundColor = primary.WithAlpha(0.06f);
-            };
-            bottomDrop.DragLeave += (s, e) => { bottomIndicator.IsVisible=false; if (card.BindingContext is ItemVm vmLeave3) ApplyItemCardStyle(card, vmLeave3); };
-            bottomDrop.Drop += async (s, e) =>
-            {
-                topIndicator.IsVisible=false; bottomIndicator.IsVisible=false;
-                if (!CanDragItems()) return; if (_selectedListId == null) return;
-                var dragItem = _dragItem; if (dragItem == null) return;
-                if (card.BindingContext is not ItemVm target) return; if (target.Id == dragItem.Id) return; if (IsUnder(dragItem, target)) return;
-                int newOrder = target.Order + 1;
-                try
+                var selectTap = new TapGestureRecognizer();
+                selectTap.Tapped += (_, __) => { if (card.BindingContext is ItemVm vmSel) SetSingleSelection(vmSel); };
+                card.GestureRecognizers.Add(selectTap);
+
+                Grid.SetRow(content, 1);
+                Grid.SetColumnSpan(content, 5);
+
+                content.Add(dragHandle, 0, 0);
+                content.Add(check, 1, 0);
+                content.Add(expandContainer, 2, 0);
+                content.Add(nameContainer, 3, 0);
+                content.Add(menuHost, 5, 0);
+
+                grid.Add(content);
+
+                Grid.SetRow(completedInfoLabel, 2);
+                Grid.SetColumnSpan(completedInfoLabel, 6);
+                completedInfoLabel.Margin = new Thickness(0, 4, 0, 0);
+                grid.Add(completedInfoLabel);
+
+                card.BindingContextChanged += (_,__) =>
                 {
-                    long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
-                    if (dragItem.ParentId != target.ParentId)
+                    if (!_itemCardBorders.Contains(card)) _itemCardBorders.Add(card);
+                    var oldVm = card.GetValue(ItemVmTrackerProperty) as ItemVm;
+                    if (oldVm != null) oldVm.PropertyChanged -= OnItemVmPropertyChanged;
+                    if (card.BindingContext is ItemVm newVm)
                     {
-                        var moveRes = await _db.MoveItemAsync(dragItem.Id, target.ParentId, expected);
-                        if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
-                        expected = moveRes.NewRevision;
-                        await RefreshItemsAsync(true);
-                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                        return;
+                        card.SetValue(ItemVmTrackerProperty, newVm);
+                        newVm.PropertyChanged += OnItemVmPropertyChanged;
+                        ApplyItemCardStyle(card, newVm);
                     }
-                    var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
-                    if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
-                    dragItem.Order = newOrder;
-                    var currentVisIdx = _items.IndexOf(dragItem);
-                    var targetVisIdx = _items.IndexOf(target);
-                    if(currentVisIdx>=0 && targetVisIdx>=0){
-                        int newVisIdx = Math.Min(_items.Count-1, targetVisIdx+1);
-                        if(currentVisIdx!=newVisIdx){ _items.RemoveAt(currentVisIdx); _items.Insert(newVisIdx, dragItem); }
-                        RefreshItemCardStyles(); UpdateStats();
-                    } else {
-                        await RefreshItemsAsync(true);
-                    }
-                    _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                }
-                catch { await RefreshItemsAsync(true); }
-            };
-            bottomHit.GestureRecognizers.Add(bottomDrop);
-
-            // Pointer pre-drag
-            var pointer = new PointerGestureRecognizer();
-            pointer.PointerPressed += (_, __) =>
-            {
-                if (card.BindingContext is not ItemVm vm || !CanDragItems()) return;
-                _holdCts?.Cancel();
-                _holdItem = vm;
-                var cts = new CancellationTokenSource();
-                _holdCts = cts;
-                Device.StartTimer(TimeSpan.FromMilliseconds(160), () =>
+                };
+                card.Unloaded += (_,__) =>
                 {
-                    if (cts.IsCancellationRequested) return false;
-                    if (_dragGestureActive) return false;
-                    SetSingleSelection(vm);
-                    vm.IsPreDrag = true;
-                    vm.IsDragging = true;
-                    ApplyItemCardStyle(card, vm);
-                    return false;
-                });
-            };
-            pointer.PointerReleased += (_, __) =>
-            {
-                if (card.BindingContext is not ItemVm vm) return;
-                _holdCts?.Cancel();
-                if (!_dragGestureActive && vm.IsDragging)
+                    var vm = card.GetValue(ItemVmTrackerProperty) as ItemVm;
+                    if (vm != null) vm.PropertyChanged -= OnItemVmPropertyChanged;
+                    _itemCardBorders.Remove(card);
+                };
+
+                card.Content = grid; card.Style=(Style)Application.Current!.Resources["CardBorder"];
+
+                var spacer = new BoxView { HeightRequest = 10, Opacity = 0, BackgroundColor = Colors.Transparent };
+                var spacerDrop = new DropGestureRecognizer { AllowDrop = true };
+                spacerDrop.DragOver += (s, e) =>
                 {
-                    vm.IsDragging = false;
-                    vm.IsPreDrag = false;
-                    ApplyItemCardStyle(card, vm);
-                }
-            };
-            card.GestureRecognizers.Add(pointer);
-
-            // Selection tap
-            var selectTap = new TapGestureRecognizer();
-            selectTap.Tapped += (_, __) => { if (card.BindingContext is ItemVm vmSel) SetSingleSelection(vmSel); };
-            card.GestureRecognizers.Add(selectTap);
-
-            // Put content in middle row of outer grid
-            Grid.SetRow(content, 1);
-            Grid.SetColumnSpan(content, 5);
-
-            // Add elements to content grid
-            content.Add(dragHandle, 0, 0);
-            content.Add(check, 1, 0);
-            content.Add(expandContainer, 2, 0);
-            content.Add(nameContainer, 3, 0);
-            content.Add(completedInfoLabel, 4, 0);
-            content.Add(menuHost, 5, 0);
-
-            grid.Add(content);
-
-            // Track this card for style updates
-            card.BindingContextChanged += (_,__) =>
-            {
-                if (!_itemCardBorders.Contains(card)) _itemCardBorders.Add(card);
-                var oldVm = card.GetValue(ItemVmTrackerProperty) as ItemVm;
-                if (oldVm != null) oldVm.PropertyChanged -= OnItemVmPropertyChanged;
-                if (card.BindingContext is ItemVm newVm)
+                    if (!CanDragItems()) return; if (_dragItem == null) return;
+                    var primary = (Color)Application.Current!.Resources["Primary"]; spacer.BackgroundColor = primary; spacer.Opacity = 0.4;
+                };
+                spacerDrop.DragLeave += (s, e) => { spacer.Opacity = 0; spacer.BackgroundColor = Colors.Transparent; };
+                spacerDrop.Drop += async (s, e) =>
                 {
-                    card.SetValue(ItemVmTrackerProperty, newVm);
-                    newVm.PropertyChanged += OnItemVmPropertyChanged;
-                    ApplyItemCardStyle(card, newVm);
-                }
-            };
-            card.Unloaded += (_,__) =>
-            {
-                var vm = card.GetValue(ItemVmTrackerProperty) as ItemVm;
-                if (vm != null) vm.PropertyChanged -= OnItemVmPropertyChanged;
-                _itemCardBorders.Remove(card);
-            };
-
-            card.Content = grid; card.Style=(Style)Application.Current!.Resources["CardBorder"];
-
-            // Spacer between items that also acts as a drop zone
-            var spacer = new BoxView { HeightRequest = 10, Opacity = 0, BackgroundColor = Colors.Transparent };
-            var spacerDrop = new DropGestureRecognizer { AllowDrop = true };
-            spacerDrop.DragOver += (s, e) =>
-            {
-                if (!CanDragItems()) return; if (_dragItem == null) return;
-                var primary = (Color)Application.Current!.Resources["Primary"]; spacer.BackgroundColor = primary; spacer.Opacity = 0.4;
-            };
-            spacerDrop.DragLeave += (s, e) => { spacer.Opacity = 0; spacer.BackgroundColor = Colors.Transparent; };
-            spacerDrop.Drop += async (s, e) =>
-            {
-                spacer.Opacity = 0; spacer.BackgroundColor = Colors.Transparent;
-                if (!CanDragItems()) return; if (_selectedListId == null) return;
-                var dragItem = _dragItem; if (dragItem == null) return; if (card.BindingContext is not ItemVm current) return;
-                var idx2 = _items.IndexOf(current);
-                ItemVm? next = (idx2 >= 0 && idx2 + 1 < _items.Count) ? _items[idx2 + 1] : null;
-                int newOrder = current.Order + 1; if (next != null) { newOrder = next.Order - 1; }
-                try
-                {
-                    long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
-                    int? targetParent = current.ParentId;
-                    if (dragItem.ParentId != targetParent)
+                    spacer.Opacity = 0; spacer.BackgroundColor = Colors.Transparent;
+                    if (!CanDragItems()) return; if (_selectedListId == null) return;
+                    var dragItem = _dragItem; if (dragItem == null) return; if (card.BindingContext is not ItemVm current) return;
+                    var idx2 = _items.IndexOf(current);
+                    ItemVm? next = (idx2 >= 0 && idx2 + 1 < _items.Count) ? _items[idx2 + 1] : null;
+                    int newOrder = current.Order + 1; if (next != null) { newOrder = next.Order - 1; }
+                    try
                     {
-                        var moveRes = await _db.MoveItemAsync(dragItem.Id, targetParent, expected);
-                        if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
-                        expected = moveRes.NewRevision;
-                        await RefreshItemsAsync(true);
-                        _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                        return;
+                        long expected = await _db.GetListRevisionAsync(_selectedListId.Value);
+                        int? targetParent = current.ParentId;
+                        if (dragItem.ParentId != targetParent)
+                        {
+                            var moveRes = await _db.MoveItemAsync(dragItem.Id, targetParent, expected);
+                            if (!moveRes.Ok) { await RefreshItemsAsync(true); return; }
+                            expected = moveRes.NewRevision;
+                            await RefreshItemsAsync(true);
+                            _lastRevision = expected; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
+                            return;
+                        }
+                        var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
+                        if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
+                        dragItem.Order = newOrder;
+                        var curVisIdx = _items.IndexOf(dragItem);
+                        var afterVisIdx = idx2>=0 ? Math.Min(_items.Count-1, idx2+1) : -1;
+                        if(curVisIdx>=0 && afterVisIdx>=0){ _items.RemoveAt(curVisIdx); _items.Insert(afterVisIdx, dragItem); RefreshItemCardStyles(); UpdateStats(); }
+                        else { await RefreshItemsAsync(true); }
+                        _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
                     }
-                    var orderRes = await _db.SetItemOrderAsync(dragItem.Id, newOrder, expected);
-                    if (!orderRes.Ok) { await RefreshItemsAsync(true); return; }
-                    dragItem.Order = newOrder;
-                    var curVisIdx = _items.IndexOf(dragItem);
-                    var afterVisIdx = idx2>=0 ? Math.Min(_items.Count-1, idx2+1) : -1;
-                    if(curVisIdx>=0 && afterVisIdx>=0){ _items.RemoveAt(curVisIdx); _items.Insert(afterVisIdx, dragItem); RefreshItemCardStyles(); UpdateStats(); }
-                    else { await RefreshItemsAsync(true); }
-                    _lastRevision = orderRes.NewRevision; _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3);
-                }
-                catch { await RefreshItemsAsync(true); }
-            };
-            spacer.GestureRecognizers.Add(spacerDrop);
+                    catch { await RefreshItemsAsync(true); }
+                };
+                spacer.GestureRecognizers.Add(spacerDrop);
 
-            return new VerticalStackLayout { Spacing=0, Children={ card, spacer } };
+                return new VerticalStackLayout { Spacing=0, Children={ card, spacer } };
+            }
+            catch
+            {
+                // Fallback minimal template to avoid crashing UI initialization
+                var lbl = new Label { Text = "Loading item...", FontSize = 14 };
+                return new ContentView { Content = lbl };
+            }
         });
     }
 // Converter classes for multi-binding chevron visibility
@@ -686,6 +701,21 @@ public class ChevronDownVisibilityConverter : IMultiValueConverter
 {
     public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture)
         => (values.Length==2 && values[0] is bool has && values[1] is bool expanded && has && expanded);
+    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => Array.Empty<object>();
+}
+public class CompletedInfoConverter : IMultiValueConverter
+{
+    public object Convert(object[] values, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        var user = values.Length>0 ? values[0] as string : null;
+        var whenObj = values.Length>1 ? values[1] : null;
+        DateTime? whenUtc = whenObj is DateTime dt ? dt : (whenObj as DateTime?);
+        if (string.IsNullOrWhiteSpace(user) || whenUtc == null)
+            return user ?? string.Empty;
+        // Convert to local time and format
+        var local = whenUtc.Value.ToLocalTime();
+        return $"Completed by {user} on {local:MMM d, yyyy h:mm tt}";
+    }
     public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => Array.Empty<object>();
 }
 
@@ -791,11 +821,8 @@ public class ChevronDownVisibilityConverter : IMultiValueConverter
             }
             RefreshItemCardStyles(); UpdateStats(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
     private async Task ResetSelectedSubtreeAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var (ok,newRev,affected)=await _db.ResetSubtreeAsync(_selectedItem.Id,expected); if(!ok){ await DisplayAlert("Reset","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return;} void Mark(ItemVm n){ n.IsCompleted=false; n.CompletedAtUtc=null; n.CompletedByUsername=null; foreach(var c in n.Children) Mark(c); n.RecalcState(); } Mark(_selectedItem); RebuildVisibleItems(); UpdateCompletedSummary(); _lastRevision=newRev; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Reset Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} }
-    private async Task ToggleItemCompletionInlineAsync(ItemVm vm,bool completed){ if(_selectedListId==null || _userId==null) return; try{ var ok=await _db.SetItemCompletedByUserAsync(vm.Id,_userId.Value,completed); if(!ok){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion","Cannot complete item yet (children incomplete)","OK"); return;} _suppressCompletionEvent=true; vm.IsCompleted=completed; vm.CompletedAtUtc=completed?DateTime.UtcNow:null; vm.CompletedByUsername=completed? _username : null; vm.RecalcState(); _suppressCompletionEvent=false; if(completed){ var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.Children.All(c=>c.IsCompleted)){ parent.IsCompleted=true; parent.CompletedAtUtc=DateTime.UtcNow; parent.CompletedByUsername=_username; parent.RecalcState(); pid=parent.ParentId; } else break; } } else { var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.IsCompleted){ parent.IsCompleted=false; parent.CompletedAtUtc=null; parent.CompletedByUsername=null; parent.RecalcState(); } pid=parent.ParentId; } } if(_hideCompleted && completed){ // incremental removal instead of full rebuild
-            for(int i=_items.Count-1;i>=0;i--){ if(_items[i].IsCompleted) _items.RemoveAt(i); }
-            if(_selectedItem!=null && _selectedItem.IsCompleted) ClearSelectionAndUi();
-            UpdateFilteredEmptyLabel(); UpdateCompletedSummary(); RefreshItemCardStyles(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3); }
-        else { RebuildVisibleItems(); UpdateCompletedSummary(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} } catch(Exception ex){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion Error", ex.Message, "OK"); await RefreshItemsAsync(true);} }
+
+    private async Task ToggleItemCompletionInlineAsync(ItemVm vm,bool completed){ if(_selectedListId==null || _userId==null) return; try{ var ok=await _db.SetItemCompletedByUserAsync(vm.Id,_userId.Value,completed); if(!ok){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion","Cannot complete item yet (children incomplete)","OK"); return;} _suppressCompletionEvent=true; vm.IsCompleted=completed; vm.CompletedAtUtc=completed?DateTime.UtcNow:null; vm.CompletedByUsername=completed? _username : null; vm.RecalcState(); _suppressCompletionEvent=false; if(completed){ var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.Children.All(c=>c.IsCompleted)){ parent.IsCompleted=true; parent.CompletedAtUtc=DateTime.UtcNow; parent.CompletedByUsername=_username; parent.RecalcState(); pid=parent.ParentId; } else break; } } else { var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.IsCompleted){ parent.IsCompleted=false; parent.CompletedAtUtc=null; parent.CompletedByUsername=null; parent.RecalcState(); } pid=parent.ParentId; } } if(_hideCompleted && completed){ for(int i=_items.Count-1;i>=0;i--){ if(_items[i].IsCompleted) _items.RemoveAt(i); } if(_selectedItem!=null && _selectedItem.IsCompleted) ClearSelectionAndUi(); UpdateFilteredEmptyLabel(); UpdateCompletedSummary(); RefreshItemCardStyles(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3); } else { RebuildVisibleItems(); UpdateCompletedSummary(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} } catch(Exception ex){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion Error", ex.Message, "OK"); await RefreshItemsAsync(true);} }
 
     // Refresh items from DB
     private async Task RefreshItemsAsync(bool userInitiated)
