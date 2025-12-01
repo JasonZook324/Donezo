@@ -146,9 +146,9 @@ public class ItemVm : BindableObject
         {
             if (!IsCompleted) return string.Empty;
             var user = string.IsNullOrWhiteSpace(CompletedByUsername) ? "" : CompletedByUsername;
-            // Updated format to include year
+            // Updated format to include year and display on two lines
             var date = CompletedAtUtc?.ToLocalTime().ToString("M/d/yyyy HH:mm") ?? string.Empty;
-            if (!string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(date)) return user + " • " + date;
+            if (!string.IsNullOrWhiteSpace(user) && !string.IsNullOrWhiteSpace(date)) return user + "\n" + date;
             if (!string.IsNullOrWhiteSpace(user)) return user;
             return date;
         }
@@ -257,6 +257,11 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
     // New item overlay fields
     private Grid _newItemOverlayRoot = null!; // scrim
     private Border _newItemModal = null!; // modal content
+
+    // NEW: Progress ring visuals
+    private Microsoft.Maui.Controls.Shapes.Path _progressArc; // foreground arc
+    private Label _progressPercentLabel; // center percentage text
+    private Grid _progressRingHost; // container
 
     // Parameterless ctor for Shell route activation
     public DashboardPage() : this(ServiceHelper.GetRequiredService<INeonDbService>(), string.Empty) { }
@@ -696,6 +701,49 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         foreach (var b in _itemCardBorders)
             if (b.BindingContext is ItemVm vm) ApplyItemCardStyle(b, vm);
     }
+
+    // Build arc geometry for progress ring and update visuals
+    private static Geometry BuildArcGeometry(double percent, double size, double thickness)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        if (percent <= 0.01)
+        {
+            // Return an empty geometry
+            return new PathGeometry();
+        }
+        // Use a circle with start at -90deg (top)
+        double radius = (size / 2.0) - (thickness / 2.0);
+        double cx = size / 2.0;
+        double cy = size / 2.0;
+        double startAngle = -90.0 * Math.PI / 180.0;
+        double endAngle = startAngle + (percent / 100.0) * 2.0 * Math.PI;
+        double sx = cx + radius * Math.Cos(startAngle);
+        double sy = cy + radius * Math.Sin(startAngle);
+        double ex = cx + radius * Math.Cos(endAngle);
+        double ey = cy + radius * Math.Sin(endAngle);
+        bool isLarge = percent > 50.0;
+        var fig = new PathFigure { StartPoint = new Point(sx, sy), IsClosed = false, IsFilled = false };
+        fig.Segments.Add(new ArcSegment
+        {
+            Point = new Point(ex, ey),
+            Size = new Size(radius, radius),
+            SweepDirection = SweepDirection.Clockwise,
+            IsLargeArc = isLarge
+        });
+        var geom = new PathGeometry();
+        geom.Figures.Add(fig);
+        return geom;
+    }
+
+    private void UpdateProgressRing(double percent)
+    {
+        if (_progressArc == null || _progressPercentLabel == null || _progressRingHost == null) return;
+        _progressPercentLabel.Text = $"{Math.Round(percent)}%";
+        var size = _progressRingHost.Width > 0 ? _progressRingHost.Width : 110; // default size
+        var thickness = 14;
+        _progressArc.Data = BuildArcGeometry(percent, size, thickness);
+    }
+
     private void UpdateStats()
     {
         if (_statsLabel == null) return;
@@ -704,6 +752,8 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         int shown = _items.Count;
         _statsLabel.Text = $"Shown {shown} / Total {total} • Completed {completed}";
         _statsLabel.TextColor = completed == total && total > 0 ? Color.FromArgb("#008A2E") : (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "Gray300" : "Gray600"];
+        double pct = total == 0 ? 0 : (completed * 100.0 / total);
+        UpdateProgressRing(pct);
     }
     private async Task LoadHideCompletedPreferenceForSelectedListAsync()
     {
