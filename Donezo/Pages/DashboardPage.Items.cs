@@ -7,6 +7,7 @@ using Microsoft.Maui.Devices;
 using Microsoft.Maui;
 using System.ComponentModel;
 using Microsoft.Maui.ApplicationModel.DataTransfer;
+using System.Globalization; // added for converter
 
 namespace Donezo.Pages;
 
@@ -636,7 +637,24 @@ public partial class DashboardPage
                     _itemCardBorders.Remove(card);
                 };
 
-                card.Content = grid; card.Style=(Style)Application.Current!.Resources["CardBorder"];
+                // Restore content & style (was accidentally removed when adding swipe)
+                card.Content = grid;
+                card.Style = (Style)Application.Current!.Resources["CardBorder"];
+
+                // Swipe to toggle completion
+                var completionSwipeItem = new SwipeItem { BackgroundColor = Color.FromArgb("#008A2E"), IconImageSource = null };
+                completionSwipeItem.SetBinding(SwipeItem.TextProperty, new Binding("IsCompleted", converter: new CompletionSwipeTextConverter()));
+                completionSwipeItem.Invoked += async (_, __) =>
+                {
+                    if (completionSwipeItem.BindingContext is ItemVm vmSwipe)
+                    {
+                        if (!CanCompleteItems()) { await ShowViewerBlockedAsync("changing completion state"); return; }
+                        await ToggleItemCompletionInlineAsync(vmSwipe, !vmSwipe.IsCompleted);
+                    }
+                };
+                var leftItems = new SwipeItems { Mode = SwipeMode.Execute };
+                leftItems.Add(completionSwipeItem);
+                var swipe = new SwipeView { Content = card, LeftItems = leftItems };
 
                 var spacer = new BoxView { HeightRequest = 10, Opacity = 0, BackgroundColor = Colors.Transparent };
                 var spacerDrop = new DropGestureRecognizer { AllowDrop = true };
@@ -680,7 +698,7 @@ public partial class DashboardPage
                 };
                 spacer.GestureRecognizers.Add(spacerDrop);
 
-                return new VerticalStackLayout { Spacing=0, Children={ card, spacer } };
+                return new VerticalStackLayout { Spacing=0, Children={ swipe, spacer } };
             }
             catch
             {
@@ -717,6 +735,15 @@ public class CompletedInfoConverter : IMultiValueConverter
         return $"Completed by {user} on {local:MMM d, yyyy h:mm tt}";
     }
     public object[] ConvertBack(object value, Type[] targetTypes, object parameter, System.Globalization.CultureInfo culture) => Array.Empty<object>();
+}
+// Converter for swipe item text (Complete / Undo)
+public class CompletionSwipeTextConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        return value is bool b && b ? "Undo" : "Complete";
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => null!;
 }
 
     // Incremental expand: insert visible descendants after parent without rebuilding whole list
