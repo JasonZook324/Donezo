@@ -221,8 +221,11 @@ public partial class DashboardPage
         // Action button: wide new item
         _openNewItemButton = new Button { Text = "+ New Item", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 20, Padding = new Thickness(18,10), HorizontalOptions = LayoutOptions.Fill, CornerRadius = 18 };
         _openNewItemButton.Clicked += (_,__) => ShowNewItemOverlay();
-        var newButtonRow = new Grid();
-        newButtonRow.Add(_openNewItemButton);
+        _resetListButton = new Button { Text = "Reset List", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 16, Padding = new Thickness(16,8), HorizontalOptions = LayoutOptions.Center, CornerRadius = 18, IsEnabled = CanResetList() };
+        _resetListButton.Clicked += (_,__) => Device.BeginInvokeOnMainThread(async ()=> await ResetEntireListAsync());
+        var newButtonRow = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
+        newButtonRow.Add(_openNewItemButton,0,0);
+        newButtonRow.Add(_resetListButton,1,0);
 
         // Filter row (keep simple toggle)
         _hideCompletedSwitch = new Switch { IsToggled=_hideCompleted };
@@ -874,6 +877,23 @@ public class CompletionSwipeTextConverter : IValueConverter
             RefreshItemCardStyles(); UpdateStats(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
     private async Task ResetSelectedSubtreeAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var (ok,newRev,affected)=await _db.ResetSubtreeAsync(_selectedItem.Id,expected); if(!ok){ await DisplayAlert("Reset","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return;} void Mark(ItemVm n){ n.IsCompleted=false; n.CompletedAtUtc=null; n.CompletedByUsername=null; foreach(var c in n.Children) Mark(c); n.RecalcState(); } Mark(_selectedItem); RebuildVisibleItems(); UpdateCompletedSummary(); _lastRevision=newRev; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Reset Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} }
 
+    private async Task ResetEntireListAsync(){
+        if(_selectedListId==null){ return; }
+        if(!CanResetList()){ await ShowViewerBlockedAsync("resetting list"); return; }
+        try{
+            var confirm = await DisplayAlert("Reset List","This will mark ALL completed items in this list as incomplete. Continue?","Yes","No");
+            if(!confirm) return;
+            ShowBusy("Resetting list...");
+            int affected = 0;
+            try{ affected = await _db.ResetListAsync(_selectedListId.Value); } catch { HideBusy(); await DisplayAlert("Reset Failed","Database error resetting list.","OK"); return; }
+            foreach(var vm in _allItems){ if(vm.IsCompleted){ vm.IsCompleted=false; vm.CompletedAtUtc=null; vm.CompletedByUsername=null; vm.RecalcState(); } }
+            RebuildVisibleItems(); UpdateCompletedSummary();
+            HideBusy();
+            try { await DisplayAlert("List Reset", $"Reset complete. {affected} items updated.", "OK"); } catch { }
+            try { _lastRevision = await _db.GetListRevisionAsync(_selectedListId.Value); _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(3); } catch { }
+        } catch { }
+    }
+
     // Track items currently animating to prevent double animation
     private readonly HashSet<int> _animatingItems = new();
 
@@ -886,20 +906,23 @@ public class CompletionSwipeTextConverter : IValueConverter
         if (vm == null) return; if(!_animatingItems.Add(vm.Id)) return; // already animating
         try
         {
+            // Small delay to allow freshly toggled item (especially first items) to finish layout before overlay
+            await Task.Delay(40);
             var successGreen = Color.FromArgb("#34C759");
             var accentColors = new[] { successGreen, Color.FromArgb("#FF9500"), Color.FromArgb("#AF52DE"), Color.FromArgb("#0A84FF") };
-            var border = _itemCardBorders.FirstOrDefault(b => b.BindingContext == vm);
+            var border = FindBorderForVm(vm);
             if (border == null) return; // not realized (off-screen)
 
             await MainThread.InvokeOnMainThreadAsync(async () =>
             {
+                // Re-resolve if layout changed during marshal
+                border = FindBorderForVm(vm);
+                if (border == null) return;
                 if (border.Content is not Grid hostGrid) return;
 
-                // Remove prior overlay if any
                 foreach(var old in hostGrid.Children.OfType<Grid>().Where(g => (string?)g.GetValue(AutomationProperties.NameProperty) == "DonezoOverlay").ToList())
                     hostGrid.Children.Remove(old);
 
-                // Derive corner radius from the card border to match exactly
                 CornerRadius cornerRadius = new CornerRadius(18);
                 if (border.StrokeShape is RoundRectangle rr) cornerRadius = rr.CornerRadius;
 
@@ -911,7 +934,6 @@ public class CompletionSwipeTextConverter : IValueConverter
                     IsClippedToBounds = true,
                     HorizontalOptions = LayoutOptions.Fill,
                     VerticalOptions = LayoutOptions.Fill,
-                    // No negative margin: we want to cover the card content exactly (inside the stroke)
                     Margin = new Thickness(0)
                 };
                 AutomationProperties.SetName(overlay, "DonezoOverlay");
@@ -920,7 +942,6 @@ public class CompletionSwipeTextConverter : IValueConverter
                 Grid.SetRowSpan(overlay, hostGrid.RowDefinitions.Count > 0 ? hostGrid.RowDefinitions.Count : 1);
                 Grid.SetColumnSpan(overlay, hostGrid.ColumnDefinitions.Count > 0 ? hostGrid.ColumnDefinitions.Count : 1);
 
-                // Background with matching rounded corners
                 var bgBorder = new Border
                 {
                     BackgroundColor = successGreen,
@@ -937,15 +958,10 @@ public class CompletionSwipeTextConverter : IValueConverter
                 var donezoLabel = new Label { Text = "Donezo!", FontSize = 22, FontAttributes = FontAttributes.Bold, TextColor = Colors.White, HorizontalTextAlignment = TextAlignment.Center };
                 overlayInner.Children.Add(checkShape); overlayInner.Children.Add(donezoLabel); overlay.Children.Add(overlayInner);
 
-                // Make underlying children transparent instead of invisible to preserve layout size
                 var underlying = hostGrid.Children.OfType<View>().Where(v => v != overlay).ToList();
-                foreach (var ch in underlying)
-                {
-                    ch.Opacity = 0; ch.InputTransparent = true; // preserve layout
-                }
+                foreach (var ch in underlying) { ch.Opacity = 0; ch.InputTransparent = true; }
                 hostGrid.Children.Add(overlay);
 
-                // Fade in only
                 await overlay.FadeTo(1.0, 220, Easing.CubicOut);
 
                 var particleTasks = new List<Task>();
@@ -965,18 +981,12 @@ public class CompletionSwipeTextConverter : IValueConverter
                 await overlay.FadeTo(0.0,240,Easing.CubicIn);
                 hostGrid.Children.Remove(overlay); _ = Task.WhenAll(particleTasks);
 
-                // Restore original children visibility (opacity) and interaction
-                foreach (var ch in underlying)
-                {
-                    ch.Opacity = 1; ch.InputTransparent = false;
-                }
+                foreach (var ch in underlying) { ch.Opacity = 1; ch.InputTransparent = false; }
                 // Ensure drag indicators remain hidden post-animation
                 foreach(var indicator in hostGrid.Children.OfType<BoxView>().Where(b => {
                         var name = (string?)b.GetValue(AutomationProperties.NameProperty);
                         return name == "DragTopIndicator" || name == "DragBottomIndicator"; }))
-                {
-                    indicator.IsVisible = false;
-                }
+                { indicator.IsVisible = false; }
             });
         }
         catch { }
@@ -1016,4 +1026,31 @@ public class CompletionSwipeTextConverter : IValueConverter
     { if(root==null) return 0; int max=0; foreach(var c in _allItems.Where(x=>x.ParentId==root.Id)) max=Math.Max(max, GetSubtreeDepth(c)); return 1+max; }
     private bool WouldExceedDepth(ItemVm dragItem,int newParentLevel)
     { try { var subtree = GetSubtreeDepth(dragItem); var resulting = newParentLevel + Math.Max(0, subtree-1); return resulting>MaxDepthUi; } catch { return false; } }
+
+    // Helper to locate Border for a given ItemVm (may not be realized yet for off-screen items)
+    private Border? FindBorderForVm(ItemVm vm)
+    {
+        if (vm == null) return null;
+        var direct = _itemCardBorders.FirstOrDefault(b => b.BindingContext == vm);
+        if (direct != null) return direct;
+        // Fallback: walk visual tree under items view
+        Border? found = null;
+        void Walk(VisualElement ve)
+        {
+            if (found != null) return;
+            if (ve is Border bb && bb.BindingContext == vm) { found = bb; return; }
+            if (ve is Layout layout)
+            {
+                foreach (var child in layout.Children.OfType<VisualElement>())
+                    Walk(child);
+            }
+            else if (ve is ContentView cv && cv.Content is VisualElement cve)
+            {
+                Walk(cve);
+            }
+        }
+        if (_itemsView is VisualElement root) Walk(root);
+        if (found != null && !_itemCardBorders.Contains(found)) _itemCardBorders.Add(found);
+        return found;
+    }
 }
