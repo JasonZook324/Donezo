@@ -6,6 +6,7 @@ using Microsoft.Maui.Storage;
 using Microsoft.Maui.Devices;
 using Microsoft.Maui;
 using System.ComponentModel;
+using Microsoft.Maui.ApplicationModel.DataTransfer;
 
 namespace Donezo.Pages;
 
@@ -240,6 +241,18 @@ public partial class DashboardPage
         return card;
     }
 
+    // Safe theme color lookup with fallbacks to avoid KeyNotFoundException
+    private static Color GetThemeColor(string darkKey, string lightKey, Color darkFallback, Color lightFallback)
+    {
+        var isDark = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app && app.UserAppTheme == AppTheme.Dark);
+        var key = isDark ? darkKey : lightKey;
+        if (Application.Current!.Resources.TryGetValue(key, out var value) && value is Color color)
+        {
+            return color;
+        }
+        return isDark ? darkFallback : lightFallback;
+    }
+
     private DataTemplate CreateItemTemplate()
     {
         return new DataTemplate(() =>
@@ -272,7 +285,16 @@ public partial class DashboardPage
             grid.Add(bottomHit, 0, 2);
 
             // Content row container
-            var content = new Grid { ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(new GridLength(28)), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
+            var content = new Grid { ColumnDefinitions={ new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(new GridLength(28)), new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
+
+            // Drag handle (small grip to avoid scroll conflicts on Android)
+            var dragHandle = new Grid { WidthRequest = 24, HeightRequest = 24, Padding = new Thickness(4), HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+            var gripColor = GetThemeColor("Gray400", "Gray700", Color.FromArgb("#BDBDBD"), Color.FromArgb("#616161"));
+            var gripDot1 = new Ellipse { WidthRequest = 4, HeightRequest = 4, Fill = gripColor, Margin = new Thickness(0,0,0,2) };
+            var gripDot2 = new Ellipse { WidthRequest = 4, HeightRequest = 4, Fill = gripColor, Margin = new Thickness(0,2,0,0) };
+            var gripStack = new VerticalStackLayout { Spacing = 0, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+            gripStack.Children.Add(gripDot1); gripStack.Children.Add(gripDot2);
+            dragHandle.Children.Add(gripStack);
 
             // Expand chevrons
             var expandContainer = new Grid { WidthRequest=28, HeightRequest=28 };
@@ -338,7 +360,7 @@ public partial class DashboardPage
 
             // Three-dot menu
             var menuHost = new Grid { WidthRequest = 32, HeightRequest = 32, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
-            bool isDarkTheme = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app && app.UserAppTheme == AppTheme.Dark);
+            bool isDarkTheme = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app2Theme && app2Theme.UserAppTheme == AppTheme.Dark);
             var dotColor = isDarkTheme ? Colors.White : Colors.Black;
             var vStack = new VerticalStackLayout { Spacing = 4, HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center, Padding = new Thickness(6,4) };
             var dot1 = new Ellipse { WidthRequest = 6, HeightRequest = 6, Fill = dotColor };
@@ -352,14 +374,19 @@ public partial class DashboardPage
             menuHost.GestureRecognizers.Add(menuTap);
             Application.Current!.RequestedThemeChanged += (_, __) =>
             {
-                bool darkNow = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app2 && app2.UserAppTheme == AppTheme.Dark);
+                bool darkNow = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app3 && app3.UserAppTheme == AppTheme.Dark);
                 var c = darkNow ? Colors.White : Colors.Black;
                 dot1.Fill = c; dot2.Fill = c; dot3.Fill = c;
             };
 
             // Drag & selection gestures
-            void OnDragStarting(object? s, DragStartingEventArgs e){ if (!CanDragItems()) return; if (card.BindingContext is ItemVm vm){ _holdCts?.Cancel(); vm.IsPreDrag=false; SetSingleSelection(vm); _dragGestureActive=true; vm.IsDragging=true; ApplyItemCardStyle(card,vm); _dragItem=vm; _pendingDragVm=vm; try{ e.Data.Properties["ItemId"] = vm.Id;}catch{} } }
-            var drag = new DragGestureRecognizer{ CanDrag=true }; drag.DragStarting += OnDragStarting; drag.DropCompleted += (_, __) => { 
+            void OnDragStarting(object? s, DragStartingEventArgs e){ if (!CanDragItems()) return; if (card.BindingContext is ItemVm vm){ _holdCts?.Cancel(); vm.IsPreDrag=false; SetSingleSelection(vm); _dragGestureActive=true; vm.IsDragging=true; ApplyItemCardStyle(card,vm); _dragItem=vm; _pendingDragVm=vm; try{ e.Data.Properties["ItemId"] = vm.Id;}catch{} 
+                // Ensure non-empty data properties to satisfy platform requirements without using unavailable APIs
+                try { e.Data.Properties["Payload"] = vm.Name ?? vm.Id.ToString(); } catch { }
+            } }
+            var drag = new DragGestureRecognizer{ CanDrag=true };
+            drag.DragStarting += OnDragStarting;
+            drag.DropCompleted += (_, __) => { 
                 if (card.BindingContext is ItemVm vmDone) { vmDone.IsDragging=false; ApplyItemCardStyle(card, vmDone); }
                 _dragItem=null; _pendingDragVm=null; _dragDropCompleted=true; _dragGestureActive=false; 
                 topIndicator.IsVisible=false; bottomIndicator.IsVisible=false; 
@@ -367,7 +394,8 @@ public partial class DashboardPage
                 {
                     ApplyItemCardStyle(card, vmRestore);
                 }
-            } ; card.GestureRecognizers.Add(drag);
+            } ;
+            dragHandle.GestureRecognizers.Add(drag);
 
             var contentDrop = new DropGestureRecognizer { AllowDrop = true };
             bool contentHovering = false;
@@ -570,11 +598,12 @@ public partial class DashboardPage
             Grid.SetColumnSpan(content, 5);
 
             // Add elements to content grid
-            content.Add(check, 0, 0);
-            content.Add(expandContainer, 1, 0);
-            content.Add(nameContainer, 2, 0);
-            content.Add(completedInfoLabel, 3, 0);
-            content.Add(menuHost, 4, 0);
+            content.Add(dragHandle, 0, 0);
+            content.Add(check, 1, 0);
+            content.Add(expandContainer, 2, 0);
+            content.Add(nameContainer, 3, 0);
+            content.Add(completedInfoLabel, 4, 0);
+            content.Add(menuHost, 5, 0);
 
             grid.Add(content);
 
