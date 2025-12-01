@@ -8,6 +8,7 @@ using Microsoft.Maui;
 using System.ComponentModel;
 using Microsoft.Maui.ApplicationModel.DataTransfer;
 using System.Globalization; // added for converter
+using System; // needed for Math
 
 namespace Donezo.Pages;
 
@@ -15,7 +16,8 @@ public partial class DashboardPage
 {
     // State flags
     private bool _pendingUiSync; private bool _suppressListRevisionCheck;
-
+    // Track items that were already completed when list was loaded to suppress initial animation
+    private readonly HashSet<int> _initialCompletedIds = new();
     // Track the VM bound to a Border so we can detach/ re-attach handlers safely
     private static readonly BindableProperty ItemVmTrackerProperty = BindableProperty.CreateAttached(
         "ItemVmTracker", typeof(ItemVm), typeof(DashboardPage), null);
@@ -288,7 +290,9 @@ public partial class DashboardPage
                 };
 
                 var topIndicator = new BoxView { HeightRequest = 2, BackgroundColor = (Color)Application.Current!.Resources["Primary"], Opacity = 0.9, IsVisible = false };
+                AutomationProperties.SetName(topIndicator, "DragTopIndicator");
                 var bottomIndicator = new BoxView { HeightRequest = 2, BackgroundColor = (Color)Application.Current!.Resources["Primary"], Opacity = 0.9, IsVisible = false };
+                AutomationProperties.SetName(bottomIndicator, "DragBottomIndicator");
                 grid.Add(topIndicator, 0, 0);
                 grid.Add(bottomIndicator, 0, 3);
 
@@ -347,7 +351,18 @@ public partial class DashboardPage
 
                 var check = new CheckBox { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
                 check.SetBinding(CheckBox.IsCheckedProperty,"IsCompleted");
-                check.CheckedChanged += async (_,e)=>{ if (_suppressCompletionEvent) return; if (!CanCompleteItems()){ _suppressCompletionEvent=true; if (check.BindingContext is ItemVm vmPrior){ var prior=!e.Value; vmPrior.IsCompleted=prior; check.IsChecked=prior; } _suppressCompletionEvent=false; await ShowViewerBlockedAsync("changing completion state"); return; } if (check.BindingContext is ItemVm vmC) await ToggleItemCompletionInlineAsync(vmC, e.Value); }; check.IsEnabled = CanCompleteItems();
+                check.CheckedChanged += async (_,e)=>{
+                    if (_suppressCompletionEvent) return;
+                    if (check.BindingContext is not ItemVm vmC) return;
+                    // Suppress spurious initial event fired by binding for items already completed when loaded
+                    if (_initialCompletedIds.Contains(vmC.Id) && vmC.CompletedAtUtc != null && e.Value == vmC.IsCompleted)
+                        return;
+                    if (!CanCompleteItems()){
+                        _suppressCompletionEvent=true;
+                        var prior=!e.Value; vmC.IsCompleted=prior; check.IsChecked=prior;
+                        _suppressCompletionEvent=false; await ShowViewerBlockedAsync("changing completion state"); return; }
+                    await ToggleItemCompletionInlineAsync(vmC, e.Value); };
+                check.IsEnabled = CanCompleteItems();
 
                 var nameLabel = new Label { VerticalTextAlignment=TextAlignment.Center, FontSize = 18 };
                 nameLabel.SetBinding(Label.TextProperty, "Name");
@@ -361,9 +376,11 @@ public partial class DashboardPage
                 nameEntry.Unfocused += async (_, __) => { if (card.BindingContext is ItemVm vmUnf && vmUnf.IsRenaming) await CommitRenameAsync(vmUnf); };
                 nameEntry.PropertyChanged += (_, pe) => { if (pe.PropertyName == nameof(Entry.IsVisible) && nameEntry.IsVisible) Device.BeginInvokeOnMainThread(() => nameEntry.Focus()); };
                 var inlineSaveBtn = new Button { Text = "Save", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
+                // FIX: bind visibility to correct property IsRenaming
                 inlineSaveBtn.SetBinding(IsVisibleProperty, "IsRenaming");
                 inlineSaveBtn.Clicked += async (_, __) => { if (inlineSaveBtn.BindingContext is ItemVm vmSave && vmSave.IsRenaming) await CommitRenameAsync(vmSave); };
                 var inlineCancelBtn = new Button { Text = "Cancel", FontSize=12, Padding=new Thickness(8,2), Style=(Style)Application.Current!.Resources["OutlinedButton"] };
+                // FIX: bind visibility to correct property IsRenaming
                 inlineCancelBtn.SetBinding(IsVisibleProperty, "IsRenaming");
                 inlineCancelBtn.Clicked += (_, __) => { if (inlineCancelBtn.BindingContext is ItemVm vmCancel) { vmCancel.IsRenaming = false; vmCancel.EditableName = vmCancel.Name; } };
                 var nameContainer = new HorizontalStackLayout { Spacing=4, VerticalOptions=LayoutOptions.Center, Children={ nameLabel, nameEntry, inlineSaveBtn, inlineCancelBtn } };
@@ -374,18 +391,31 @@ public partial class DashboardPage
                     Setters = { new Setter { Property = View.TranslationXProperty, Value = -20 } }
                 });
 
-                var completedInfoLabel = new Label { FontSize=12, TextColor=Color.FromArgb("#008A2E"), FontAttributes=FontAttributes.Italic, LineBreakMode=LineBreakMode.NoWrap, HorizontalOptions = LayoutOptions.Fill, VerticalTextAlignment=TextAlignment.Center, HorizontalTextAlignment = TextAlignment.Center };
-                completedInfoLabel.SetBinding(Label.IsVisibleProperty,"ShowCompletedInfo");
-                // Bind both username and timestamp
+                // Remove prior duplicated completedInfoLabel; define single overlay-style label that does not alter layout height
+                var completedInfoLabel = new Label
+                {
+                    FontSize = 12,
+                    TextColor = Color.FromArgb("#008A2E"),
+                    FontAttributes = FontAttributes.Italic,
+                    LineBreakMode = LineBreakMode.NoWrap,
+                    HorizontalTextAlignment = TextAlignment.Center,
+                    VerticalTextAlignment = TextAlignment.Center,
+                    HorizontalOptions = LayoutOptions.Center,
+                    VerticalOptions = LayoutOptions.End,
+                    Margin = new Thickness(0,0,0,2)
+                };
+                completedInfoLabel.SetBinding(Label.IsVisibleProperty, "ShowCompletedInfo");
                 completedInfoLabel.SetBinding(Label.TextProperty, new MultiBinding
                 {
-                    Bindings =
-                    {
-                        new Binding("CompletedByUsername"),
-                        new Binding("CompletedAtUtc")
-                    },
+                    Bindings = { new Binding("CompletedByUsername"), new Binding("CompletedAtUtc") },
                     Converter = new CompletedInfoConverter()
                 });
+                // Span entire grid so it overlays without resizing any row
+                Grid.SetRow(completedInfoLabel, 0);
+                Grid.SetRowSpan(completedInfoLabel, 4);
+                Grid.SetColumnSpan(completedInfoLabel, 6);
+                completedInfoLabel.SetValue(ZIndexProperty, 50);
+                grid.Add(completedInfoLabel);
 
                 var menuHost = new Grid { WidthRequest = 32, HeightRequest = 32, HorizontalOptions = LayoutOptions.End, VerticalOptions = LayoutOptions.Center };
                 bool isDarkTheme = Application.Current!.RequestedTheme == AppTheme.Dark || (Application.Current is App app2Theme && app2Theme.UserAppTheme == AppTheme.Dark);
@@ -612,11 +642,6 @@ public partial class DashboardPage
                 content.Add(menuHost, 5, 0);
 
                 grid.Add(content);
-
-                Grid.SetRow(completedInfoLabel, 2);
-                Grid.SetColumnSpan(completedInfoLabel, 6);
-                completedInfoLabel.Margin = new Thickness(0, 4, 0, 0);
-                grid.Add(completedInfoLabel);
 
                 card.BindingContextChanged += (_,__) =>
                 {
@@ -849,9 +874,119 @@ public class CompletionSwipeTextConverter : IValueConverter
             RefreshItemCardStyles(); UpdateStats(); _lastRevision=res.NewRevision; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch{ await RefreshItemsAsync(true);} UpdateMoveButtons(); }
     private async Task ResetSelectedSubtreeAsync(){ if(_selectedItem==null) return; var listId=_selectedListId; if(listId==null) return; try{ var expected=await _db.GetListRevisionAsync(listId.Value); var (ok,newRev,affected)=await _db.ResetSubtreeAsync(_selectedItem.Id,expected); if(!ok){ await DisplayAlert("Reset","Concurrency mismatch; items refreshed.","OK"); await RefreshItemsAsync(true); return;} void Mark(ItemVm n){ n.IsCompleted=false; n.CompletedAtUtc=null; n.CompletedByUsername=null; foreach(var c in n.Children) Mark(c); n.RecalcState(); } Mark(_selectedItem); RebuildVisibleItems(); UpdateCompletedSummary(); _lastRevision=newRev; _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} catch(Exception ex){ await DisplayAlert("Reset Failed", ex.Message, "OK"); await RefreshItemsAsync(true);} }
 
-    private async Task ToggleItemCompletionInlineAsync(ItemVm vm,bool completed){ if(_selectedListId==null || _userId==null) return; try{ var ok=await _db.SetItemCompletedByUserAsync(vm.Id,_userId.Value,completed); if(!ok){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion","Cannot complete item yet (children incomplete)","OK"); return;} _suppressCompletionEvent=true; vm.IsCompleted=completed; vm.CompletedAtUtc=completed?DateTime.UtcNow:null; vm.CompletedByUsername=completed? _username : null; vm.RecalcState(); _suppressCompletionEvent=false; if(completed){ var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.Children.All(c=>c.IsCompleted)){ parent.IsCompleted=true; parent.CompletedAtUtc=DateTime.UtcNow; parent.CompletedByUsername=_username; parent.RecalcState(); pid=parent.ParentId; } else break; } } else { var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.IsCompleted){ parent.IsCompleted=false; parent.CompletedAtUtc=null; parent.CompletedByUsername=null; parent.RecalcState(); } pid=parent.ParentId; } } if(_hideCompleted && completed){ for(int i=_items.Count-1;i>=0;i--){ if(_items[i].IsCompleted) _items.RemoveAt(i); } if(_selectedItem!=null && _selectedItem.IsCompleted) ClearSelectionAndUi(); UpdateFilteredEmptyLabel(); UpdateCompletedSummary(); RefreshItemCardStyles(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3); } else { RebuildVisibleItems(); UpdateCompletedSummary(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} } catch(Exception ex){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion Error", ex.Message, "OK"); await RefreshItemsAsync(true);} }
+    // Track items currently animating to prevent double animation
+    private readonly HashSet<int> _animatingItems = new();
 
-    // Refresh items from DB
+    private async Task ToggleItemCompletionInlineAsync(ItemVm vm,bool completed){ if(_selectedListId==null || _userId==null) return; try{ var ok=await _db.SetItemCompletedByUserAsync(vm.Id,_userId.Value,completed); if(!ok){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion","Cannot complete item yet (children incomplete)","OK"); return;} _suppressCompletionEvent=true; vm.IsCompleted=completed; vm.CompletedAtUtc=completed?DateTime.UtcNow:null; vm.CompletedByUsername=completed? _username : null; vm.RecalcState(); _suppressCompletionEvent=false; if(completed){ var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.Children.All(c=>c.IsCompleted)){ parent.IsCompleted=true; parent.CompletedAtUtc=DateTime.UtcNow; parent.CompletedByUsername=_username; parent.RecalcState(); pid=parent.ParentId; } else break; } // Only play animation if not originally completed at load
+            if(!_initialCompletedIds.Contains(vm.Id) && !_animatingItems.Contains(vm.Id)) await PlayCompletionAnimationAsync(vm); } else { var pid=vm.ParentId; while(pid!=null){ var parent=_allItems.FirstOrDefault(x=>x.Id==pid.Value); if(parent==null) break; if(parent.IsCompleted){ parent.IsCompleted=false; parent.CompletedAtUtc=null; parent.CompletedByUsername=null; parent.RecalcState(); } pid=parent.ParentId; } } if(_hideCompleted && completed){ for(int i=_items.Count-1;i>=0;i--){ if(_items[i].IsCompleted) _items.RemoveAt(i); } if(_selectedItem!=null && _selectedItem.IsCompleted) ClearSelectionAndUi(); UpdateFilteredEmptyLabel(); UpdateCompletedSummary(); RefreshItemCardStyles(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3); } else { RebuildVisibleItems(); UpdateCompletedSummary(); _skipAutoRefreshUntil=DateTime.UtcNow.AddSeconds(3);} // Once item newly completed, ensure it is no longer treated as initial
+            if(completed) _initialCompletedIds.Remove(vm.Id); } catch(Exception ex){ _suppressCompletionEvent=true; vm.IsCompleted=!completed; _suppressCompletionEvent=false; await DisplayAlert("Completion Error", ex.Message, "OK"); await RefreshItemsAsync(true);} }
+
+    private async Task PlayCompletionAnimationAsync(ItemVm vm)
+    {
+        if (vm == null) return; if(!_animatingItems.Add(vm.Id)) return; // already animating
+        try
+        {
+            var successGreen = Color.FromArgb("#34C759");
+            var accentColors = new[] { successGreen, Color.FromArgb("#FF9500"), Color.FromArgb("#AF52DE"), Color.FromArgb("#0A84FF") };
+            var border = _itemCardBorders.FirstOrDefault(b => b.BindingContext == vm);
+            if (border == null) return; // not realized (off-screen)
+
+            await MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (border.Content is not Grid hostGrid) return;
+
+                // Remove prior overlay if any
+                foreach(var old in hostGrid.Children.OfType<Grid>().Where(g => (string?)g.GetValue(AutomationProperties.NameProperty) == "DonezoOverlay").ToList())
+                    hostGrid.Children.Remove(old);
+
+                // Derive corner radius from the card border to match exactly
+                CornerRadius cornerRadius = new CornerRadius(18);
+                if (border.StrokeShape is RoundRectangle rr) cornerRadius = rr.CornerRadius;
+
+                var overlay = new Grid
+                {
+                    Opacity = 0,
+                    Scale = 1.0,
+                    InputTransparent = true,
+                    IsClippedToBounds = true,
+                    HorizontalOptions = LayoutOptions.Fill,
+                    VerticalOptions = LayoutOptions.Fill,
+                    // No negative margin: we want to cover the card content exactly (inside the stroke)
+                    Margin = new Thickness(0)
+                };
+                AutomationProperties.SetName(overlay, "DonezoOverlay");
+                overlay.SetValue(ZIndexProperty, 100);
+                Grid.SetRow(overlay, 0); Grid.SetColumn(overlay, 0);
+                Grid.SetRowSpan(overlay, hostGrid.RowDefinitions.Count > 0 ? hostGrid.RowDefinitions.Count : 1);
+                Grid.SetColumnSpan(overlay, hostGrid.ColumnDefinitions.Count > 0 ? hostGrid.ColumnDefinitions.Count : 1);
+
+                // Background with matching rounded corners
+                var bgBorder = new Border
+                {
+                    BackgroundColor = successGreen,
+                    StrokeShape = new RoundRectangle { CornerRadius = cornerRadius },
+                    HorizontalOptions = LayoutOptions.Fill,
+                    VerticalOptions = LayoutOptions.Fill,
+                    Opacity = 1.0
+                };
+                overlay.Children.Add(bgBorder);
+
+                var overlayInner = new Grid { HorizontalOptions = LayoutOptions.Center, VerticalOptions = LayoutOptions.Center };
+                Geometry? checkGeom = null; try { checkGeom = (Geometry)new PathGeometryConverter().ConvertFromInvariantString("M8 22 L18 32 L38 12"); } catch { }
+                View checkShape = checkGeom != null ? new Microsoft.Maui.Controls.Shapes.Path { Data = checkGeom, Stroke = new SolidColorBrush(Colors.White), StrokeThickness = 6, StrokeLineCap = PenLineCap.Round, StrokeLineJoin = PenLineJoin.Round, WidthRequest = 48, HeightRequest = 48 } : new BoxView { WidthRequest = 48, HeightRequest = 6, BackgroundColor = Colors.White, Rotation = 45, CornerRadius = 3 };
+                var donezoLabel = new Label { Text = "Donezo!", FontSize = 22, FontAttributes = FontAttributes.Bold, TextColor = Colors.White, HorizontalTextAlignment = TextAlignment.Center };
+                overlayInner.Children.Add(checkShape); overlayInner.Children.Add(donezoLabel); overlay.Children.Add(overlayInner);
+
+                // Make underlying children transparent instead of invisible to preserve layout size
+                var underlying = hostGrid.Children.OfType<View>().Where(v => v != overlay).ToList();
+                foreach (var ch in underlying)
+                {
+                    ch.Opacity = 0; ch.InputTransparent = true; // preserve layout
+                }
+                hostGrid.Children.Add(overlay);
+
+                // Fade in only
+                await overlay.FadeTo(1.0, 220, Easing.CubicOut);
+
+                var particleTasks = new List<Task>();
+                int particleCount = 10;
+                for(int i=0;i<particleCount;i++)
+                {
+                    var color = accentColors[_animRand.Next(accentColors.Length)];
+                    var p = new BoxView { WidthRequest=8, HeightRequest=8, CornerRadius=4, BackgroundColor=color, Opacity=0.95, TranslationX=0, TranslationY=0, Scale=1.0 };
+                    overlay.Children.Add(p); p.SetValue(ZIndexProperty, 110);
+                    double angle=_animRand.NextDouble()*Math.PI*2; double distance=50+_animRand.NextDouble()*70; int travelMs=520+_animRand.Next(240);
+                    double dx=Math.Cos(angle)*distance; double dy=Math.Sin(angle)*distance*0.9;
+                    var t = Task.WhenAll(p.TranslateTo(dx,dy,(uint)travelMs,Easing.CubicOut), p.FadeTo(0.0,(uint)(travelMs+100),Easing.CubicIn), p.ScaleTo(0.3,(uint)travelMs,Easing.CubicOut))
+                        .ContinueWith(_=> MainThread.BeginInvokeOnMainThread(()=> overlay.Children.Remove(p)));
+                    particleTasks.Add(t);
+                }
+                await Task.Delay(340);
+                await overlay.FadeTo(0.0,240,Easing.CubicIn);
+                hostGrid.Children.Remove(overlay); _ = Task.WhenAll(particleTasks);
+
+                // Restore original children visibility (opacity) and interaction
+                foreach (var ch in underlying)
+                {
+                    ch.Opacity = 1; ch.InputTransparent = false;
+                }
+                // Ensure drag indicators remain hidden post-animation
+                foreach(var indicator in hostGrid.Children.OfType<BoxView>().Where(b => {
+                        var name = (string?)b.GetValue(AutomationProperties.NameProperty);
+                        return name == "DragTopIndicator" || name == "DragBottomIndicator"; }))
+                {
+                    indicator.IsVisible = false;
+                }
+            });
+        }
+        catch { }
+        finally { _animatingItems.Remove(vm.Id); }
+    }
+
+    // Animation RNG (restored)
+    private readonly Random _animRand = new();
+
+    // Refresh items from DB (restored)
     private async Task RefreshItemsAsync(bool userInitiated)
     {
         if (_selectedListId==null){ _items.Clear(); _allItems.Clear(); UpdateCompletedSummary(); return; }
@@ -859,43 +994,26 @@ public class CompletionSwipeTextConverter : IValueConverter
         try
         {
             IReadOnlyList<ItemRecord>? records = null; try { records = await _db.GetItemsAsync(_selectedListId.Value); } catch { }
-            if (records==null){ // do NOT clear existing items on transient failure
-                return; }
+            if (records==null) return;
             _allItems.Clear();
-            foreach(var r in records){ var vm=CreateVmFromRecord(r); _allItems.Add(vm); }
-            var byId=_allItems.ToDictionary(x=>x.Id); foreach(var vm in _allItems){ if(vm.ParentId!=null && byId.TryGetValue(vm.ParentId.Value,out var p)) p.Children.Add(vm); }
+            _initialCompletedIds.Clear(); // capture which items start completed
+            foreach(var r in records){ if(r.IsCompleted) _initialCompletedIds.Add(r.Id); _allItems.Add(CreateVmFromRecord(r)); }
+            var byId = _allItems.ToDictionary(x=>x.Id);
+            foreach(var vm in _allItems)
+            {
+                if(vm.ParentId!=null && byId.TryGetValue(vm.ParentId.Value,out var parent)) parent.Children.Add(vm);
+            }
             foreach(var vm in _allItems) vm.RecalcState();
             await LoadHideCompletedPreferenceForSelectedListAsync();
             RebuildVisibleItems(); UpdateCompletedSummary();
-            // Set baseline revision after successful full refresh to prevent immediate duplicate polling refresh
-            try { _lastRevision = await _db.GetListRevisionAsync(_selectedListId.Value); } catch { /* ignore */ }
+            try { _lastRevision = await _db.GetListRevisionAsync(_selectedListId.Value); } catch { }
         }
         finally { _isRefreshing=false; _suppressListRevisionCheck=false; }
     }
-
     private void UpdateCompletedSummary() { UpdateStats(); }
-
-    private const int MaxDepthUi = 3; // mirror of service MaxDepth for client-side indication
-
+    private const int MaxDepthUi = 3; // consistent with UI depth rule
     private int GetSubtreeDepth(ItemVm root)
-    {
-        if (root == null) return 0;
-        int maxChild = 0;
-        foreach (var c in _allItems.Where(x => x.ParentId == root.Id))
-        {
-            maxChild = Math.Max(maxChild, GetSubtreeDepth(c));
-        }
-        return 1 + maxChild;
-    }
-    private bool WouldExceedDepth(ItemVm dragItem, int newParentLevel)
-    {
-        try
-        {
-            var subtree = GetSubtreeDepth(dragItem); // depth including the item itself
-            // Resulting deepest level = newParentLevel (for the item itself) + (subtree - 1) for its deepest descendant
-            var resultingMaxLevel = newParentLevel + Math.Max(0, subtree - 1);
-            return resultingMaxLevel > MaxDepthUi;
-        }
-        catch { return false; }
-    }
+    { if(root==null) return 0; int max=0; foreach(var c in _allItems.Where(x=>x.ParentId==root.Id)) max=Math.Max(max, GetSubtreeDepth(c)); return 1+max; }
+    private bool WouldExceedDepth(ItemVm dragItem,int newParentLevel)
+    { try { var subtree = GetSubtreeDepth(dragItem); var resulting = newParentLevel + Math.Max(0, subtree-1); return resulting>MaxDepthUi; } catch { return false; } }
 }
