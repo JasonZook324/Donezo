@@ -423,16 +423,43 @@ public partial class NeonDbService : INeonDbService
         return newId;
     }
 
+    // Daily auto-reset helper
+    private async Task EnsureDailyResetAsync(NpgsqlConnection conn, int listId, CancellationToken ct)
+    {
+        await using var chk = new NpgsqlCommand("select is_daily, coalesce(last_reset_date, date '1970-01-01') from lists where id=@l", conn);
+        chk.Parameters.AddWithValue("l", listId);
+        bool isDaily = false;
+        await using (var r = await chk.ExecuteReaderAsync(ct))
+        { if (await r.ReadAsync(ct)) isDaily = r.GetBoolean(0); }
+        if (!isDaily) return;
+        await using var needCmd = new NpgsqlCommand("select (current_date > coalesce(last_reset_date, current_date)) from lists where id=@l", conn);
+        needCmd.Parameters.AddWithValue("l", listId);
+        var needObj = await needCmd.ExecuteScalarAsync(ct);
+        bool needsReset = needObj is bool b && b;
+        if (!needsReset) return;
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        try
+        {
+            await using (var clr = new NpgsqlCommand("update items set is_completed=false, completed_by_user_id=null, completed_at=null where list_id=@l", conn, tx))
+            { clr.Parameters.AddWithValue("l", listId); await clr.ExecuteNonQueryAsync(ct); }
+            await using (var upd = new NpgsqlCommand("update lists set last_reset_date=current_date, revision=revision+1 where id=@l", conn, tx))
+            { upd.Parameters.AddWithValue("l", listId); await upd.ExecuteNonQueryAsync(ct); }
+            await tx.CommitAsync(ct);
+            try { await LogAsync("Info", "DailyReset", $"Daily list {listId} auto-reset", null, listId, null, null, ct); } catch { }
+        }
+        catch { try { await tx.RollbackAsync(ct); } catch { } }
+    }
+
     public async Task<IReadOnlyList<ItemRecord>> GetItemsAsync(int listId, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
+        try { await EnsureDailyResetAsync(conn, listId, ct); } catch { }
         const string sql = "with recursive tree as ( select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.\"order\", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, 1 level, lpad(i.\"order\"::text,10,'0') sort_key, i.completed_by_user_id, u.username completed_by_username, i.completed_at from items i left join users u on u.id=i.completed_by_user_id where i.list_id=@list and i.parent_item_id is null union all select c.id,c.list_id,c.name,c.is_completed,c.parent_item_id,c.\"order\", (select count(*) from items cc where cc.parent_item_id=c.id) children_count, (select count(*) from items cc where cc.parent_item_id=c.id and cc.is_completed=false) incomplete_children_count, p.level+1, p.sort_key||'-'||lpad(c.\"order\"::text,10,'0'), c.completed_by_user_id, u2.username, c.completed_at from items c left join users u2 on u2.id=c.completed_by_user_id join tree p on c.parent_item_id=p.id ) select * from tree order by sort_key";
         var items = new List<ItemRecord>(); await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("list", listId); await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) { var id = r.GetInt32(0); var listIdVal = r.GetInt32(1); var name = r.GetString(2); var completed = r.GetBoolean(3); var parent = r.IsDBNull(4) ? (int?)null : r.GetInt32(4); var order = r.GetInt32(5); var childrenCount = r.GetInt32(6); var incompleteChildrenCount = r.GetInt32(7); var level = r.GetInt32(8); var sortKey = r.GetString(9); var completedByUserId = r.IsDBNull(10) ? (int?)null : r.GetInt32(10); var completedByUsername = r.IsDBNull(11) ? null : r.GetString(11); var completedAtUtc = r.IsDBNull(12) ? (DateTime?)null : r.GetDateTime(12); items.Add(new ItemRecord(id, listIdVal, name, completed, parent, childrenCount > 0, childrenCount, incompleteChildrenCount, level, sortKey, order, completedByUserId, completedByUsername, completedAtUtc)); } return items;
     }
 
     public async Task<IReadOnlyList<ItemRecord>> GetChildrenAsync(int parentItemId, CancellationToken ct = default)
-    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); var sql = "select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.\"order\", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, i.completed_by_user_id, u.username, i.completed_at from items i left join users u on u.id=i.completed_by_user_id where i.parent_item_id=@p order by i.\"order\""; var list = new List<ItemRecord>(); await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("p", parentItemId); await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) { var id = r.GetInt32(0); var listIdVal = r.GetInt32(1); var name = r.GetString(2); var completed = r.GetBoolean(3); var parent = r.IsDBNull(4) ? (int?)null : r.GetInt32(4); var order = r.GetInt32(5); var childrenCount = r.GetInt32(6); var incompleteChildrenCount = r.GetInt32(7); var completedByUserId = r.IsDBNull(8) ? (int?)null : r.GetInt32(8); var completedByUsername = r.IsDBNull(9) ? null : r.GetString(9); var completedAtUtc = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10); list.Add(new ItemRecord(id, listIdVal, name, completed, parent, childrenCount > 0, childrenCount, incompleteChildrenCount, 0, string.Empty, order, completedByUserId, completedByUsername, completedAtUtc)); } return list;
-    }
+    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); var sql = "select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.\"order\", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, i.completed_by_user_id, u.username, i.completed_at from items i left join users u on u.id=i.completed_by_user_id where i.parent_item_id=@p order by i.\"order\""; var list = new List<ItemRecord>(); await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("p", parentItemId); await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) { var id = r.GetInt32(0); var listIdVal = r.GetInt32(1); var name = r.GetString(2); var completed = r.GetBoolean(3); var parent = r.IsDBNull(4) ? (int?)null : r.GetInt32(4); var order = r.GetInt32(5); var childrenCount = r.GetInt32(6); var incompleteChildrenCount = r.GetInt32(7); var completedByUserId = r.IsDBNull(8) ? (int?)null : r.GetInt32(8); var completedByUsername = r.IsDBNull(9) ? null : r.GetString(9); var completedAtUtc = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10); list.Add(new ItemRecord(id, listIdVal, name, completed, parent, childrenCount > 0, childrenCount, incompleteChildrenCount, 0, string.Empty, order, completedByUserId, completedByUsername, completedAtUtc)); } return list; }
 
     public async Task<ItemRecord?> GetItemAsync(int itemId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); var sql = "select i.id,i.list_id,i.name,i.is_completed,i.parent_item_id,i.\"order\", (select count(*) from items c where c.parent_item_id=i.id) children_count, (select count(*) from items c where c.parent_item_id=i.id and c.is_completed=false) incomplete_children_count, i.completed_by_user_id, u.username, i.completed_at from items i left join users u on u.id=i.completed_by_user_id where i.id=@i"; await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("i", itemId); await using var r = await cmd.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return null; var id = r.GetInt32(0); var listIdVal = r.GetInt32(1); var name = r.GetString(2); var completed = r.GetBoolean(3); var parent = r.IsDBNull(4) ? (int?)null : r.GetInt32(4); var order = r.GetInt32(5); var childrenCount = r.GetInt32(6); var incompleteChildrenCount = r.GetInt32(7); var completedByUserId = r.IsDBNull(8) ? (int?)null : r.GetInt32(8); var completedByUsername = r.IsDBNull(9) ? null : r.GetString(9); var completedAtUtc = r.IsDBNull(10) ? (DateTime?)null : r.GetDateTime(10); return new ItemRecord(id, listIdVal, name, completed, parent, childrenCount > 0, childrenCount, incompleteChildrenCount, 0, string.Empty, order, completedByUserId, completedByUsername, completedAtUtc); }
@@ -454,8 +481,10 @@ public partial class NeonDbService : INeonDbService
     public async Task<(bool Ok,long NewRevision)> MoveItemAsync(int itemId, int? newParentItemId, long expectedRevision, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
-        int listId; int? oldParent; await using (var info = new NpgsqlCommand("select list_id,parent_item_id from items where id=@i", conn)) { info.Parameters.AddWithValue("i", itemId); await using var r = await info.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return (false, 0); listId = r.GetInt32(0); oldParent = r.IsDBNull(1) ? null : r.GetInt32(1); }
+        int listId; await using (var info = new NpgsqlCommand("select list_id from items where id=@i", conn)) { info.Parameters.AddWithValue("i", itemId); var res = await info.ExecuteScalarAsync(ct); if (res is int li) listId = li; else return (false, 0); }
         var currentRevision = await GetListRevisionInternalAsync(conn, listId, ct); if (currentRevision != expectedRevision) return (false, currentRevision);
+        if (newParentItemId != null) { int parentListId; await using (var checkParent = new NpgsqlCommand("select list_id from items where id=@pid", conn)) { checkParent.Parameters.AddWithValue("pid", newParentItemId.Value); var resParent = await checkParent.ExecuteScalarAsync(ct); if (resParent is int plid) parentListId = plid; else return (false, currentRevision); if (parentListId != listId) return (false, currentRevision); } }
+        int? oldParent; await using (var info = new NpgsqlCommand("select parent_item_id from items where id=@i", conn)) { info.Parameters.AddWithValue("i", itemId); var res = await info.ExecuteScalarAsync(ct); oldParent = res is int pid ? pid : (int?)null; }
         if (oldParent == newParentItemId) return (true, currentRevision); // no-op
         int subtreeDepth = await GetSubtreeDepthAsync(conn, itemId, ct);
         int newParentDepth = 0; if (newParentItemId != null) { await using var chk = new NpgsqlCommand("select list_id from items where id=@p", conn); chk.Parameters.AddWithValue("p", newParentItemId.Value); var res = await chk.ExecuteScalarAsync(ct); if (res is int li && li != listId) return (false, currentRevision); if (res == null) return (false, currentRevision); newParentDepth = await GetItemDepthAsync(conn, newParentItemId.Value, ct); }
@@ -476,7 +505,7 @@ public partial class NeonDbService : INeonDbService
         var currentRevision = await GetListRevisionInternalAsync(conn, listId, ct); if (currentRevision != expectedRevision) return (false, currentRevision);
         long newRevision; await using (var tx = await conn.BeginTransactionAsync(ct))
         {
-            await using (var upd = new NpgsqlCommand("update items set \"order\"=@o where id=@i", conn)) { upd.Transaction = tx; upd.Parameters.AddWithValue("o", newOrder); upd.Parameters.AddWithValue("i", itemId); await upd.ExecuteNonQueryAsync(ct); }
+            await using (var upd = new NpgsqlCommand("update items set \"order\"=@o where id=@i", conn, tx)) { upd.Parameters.AddWithValue("o", newOrder); upd.Parameters.AddWithValue("i", itemId); await upd.ExecuteNonQueryAsync(ct); }
             newRevision = await IncrementRevisionAsync(conn, listId, tx, ct);
             await tx.CommitAsync(ct);
         }
@@ -531,6 +560,13 @@ public partial class NeonDbService : INeonDbService
     public async Task SetUserThemeDarkAsync(int userId, bool dark, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("insert into user_prefs(user_id,theme_dark) values(@u,@d) on conflict(user_id) do update set theme_dark=excluded.theme_dark", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("d", dark); await cmd.ExecuteNonQueryAsync(ct); }
 
+    // Add missing implementations for list hide_completed preference
+    public async Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default)
+    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("select hide_completed from user_list_prefs where user_id=@u and list_id=@l", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); var res = await cmd.ExecuteScalarAsync(ct); if (res is DBNull || res is null) return null; return (bool)res; }
+
+    public async Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default)
+    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("insert into user_list_prefs(user_id,list_id,hide_completed,updated_at) values(@u,@l,@h,now()) on conflict(user_id,list_id) do update set hide_completed=excluded.hide_completed, updated_at=excluded.updated_at", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); cmd.Parameters.AddWithValue("h", hideCompleted); await cmd.ExecuteNonQueryAsync(ct); }
+
     public async Task<IReadOnlyList<ShareCodeRecord>> GetShareCodesAsync(int listId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); var list = new List<ShareCodeRecord>(); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); var hasRoleCol = await ShareCodesHasRoleColumnAsync(conn, ct); string sql = hasRoleCol ? "select sc.id, sc.list_id, sc.code, sc.role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted from list_share_codes sc where sc.list_id=@l order by sc.created_at desc" : "select sc.id, sc.list_id, sc.code, r.name as role, sc.expiration, sc.max_redeems, sc.redeemed_count, sc.is_deleted from list_share_codes sc left join roles r on r.id=sc.role_id where sc.list_id=@l order by sc.created_at desc"; await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("l", listId); await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) list.Add(new ShareCodeRecord(r.GetInt32(0), r.GetInt32(1), r.GetString(2), r.GetString(3), r.IsDBNull(4) ? null : r.GetDateTime(4), r.GetInt32(5), r.GetInt32(6), r.GetBoolean(7))); return list; }
 
@@ -544,7 +580,6 @@ public partial class NeonDbService : INeonDbService
     public async Task<bool> SoftDeleteShareCodeAsync(int shareCodeId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("update list_share_codes set is_deleted=true where id=@i", conn); cmd.Parameters.AddWithValue("i", shareCodeId); return await cmd.ExecuteNonQueryAsync(ct) == 1; }
 
-    // === Membership & share code redemption methods (restored) ===
     public async Task<(bool Ok, MembershipRecord? Membership)> RedeemShareCodeAsync(int listId, int userId, string code, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct);
@@ -638,7 +673,6 @@ public partial class NeonDbService : INeonDbService
     public async Task<bool> SetItemCompletedByUserAsync(int itemId, int userId, bool completed, CancellationToken ct = default)
         => await SetItemCompletedByUserInternalAsync(itemId, userId, completed, ct);
 
-    // === Account Management Methods ===
     public async Task<UserProfileRecord?> GetUserProfileAsync(int userId, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct);
@@ -657,7 +691,6 @@ public partial class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        // Unique check (case-insensitive)
         await using (var chk = new NpgsqlCommand("select 1 from users where lower(username)=lower(@u) and id<>@id", conn))
         { chk.Parameters.AddWithValue("u", newUsername); chk.Parameters.AddWithValue("id", userId); if (await chk.ExecuteScalarAsync(ct) != null) return false; }
         await using var cmd = new NpgsqlCommand("update users set username=@u where id=@id", conn);
@@ -686,16 +719,13 @@ public partial class NeonDbService : INeonDbService
         await EnsureSchemaAsync(ct);
         await using var conn = new NpgsqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-        // Read current hash + salt
         string? storedHash = null; string? storedSaltBase64 = null;
         await using (var read = new NpgsqlCommand("select password_hash,password_salt from users where id=@id", conn))
         { read.Parameters.AddWithValue("id", userId); await using var r = await read.ExecuteReaderAsync(ct); if (!await r.ReadAsync(ct)) return false; storedHash = r.GetString(0); storedSaltBase64 = r.GetString(1); }
         if (storedHash == null || storedSaltBase64 == null) return false;
         var saltBytes = Convert.FromBase64String(storedSaltBase64);
-        // Verify current password
         var recomputed = HashPassword(currentPassword, saltBytes, ExtractIterations(storedHash));
         if (!ConstantTimeEquals(storedHash, recomputed)) return false;
-        // Generate new hash + salt
         var newSalt = GenerateSalt(16);
         var newHash = HashPassword(newPassword, newSalt, 100_000);
         await using (var upd = new NpgsqlCommand("update users set password_hash=@h,password_salt=@s where id=@id", conn))
@@ -730,7 +760,6 @@ public partial class NeonDbService : INeonDbService
         return true;
     }
 
-    // Logging implementation
     public async Task<int> LogAsync(string level, string eventType, string message, int? userId = null, int? listId = null, int? itemId = null, object? data = null, CancellationToken ct = default)
     {
         await EnsureSchemaAsync(ct);
@@ -789,7 +818,6 @@ public partial class NeonDbService : INeonDbService
         return list;
     }
 
-    // === UI State & Preferences (restored) ===
     public async Task<bool> GetItemExpandedAsync(int userId, int itemId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("select expanded from item_ui_state where user_id=@u and item_id=@i", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("i", itemId); var res = await cmd.ExecuteScalarAsync(ct); return res is bool b ? b : true; }
 
@@ -799,13 +827,6 @@ public partial class NeonDbService : INeonDbService
     public async Task<IDictionary<int,bool>> GetExpandedStatesAsync(int userId, int listId, CancellationToken ct = default)
     { await EnsureSchemaAsync(ct); var dict = new Dictionary<int,bool>(); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); const string sql = "select s.item_id,s.expanded from item_ui_state s join items i on i.id=s.item_id where s.user_id=@u and i.list_id=@l"; await using var cmd = new NpgsqlCommand(sql, conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); await using var r = await cmd.ExecuteReaderAsync(ct); while (await r.ReadAsync(ct)) dict[r.GetInt32(0)] = r.GetBoolean(1); return dict; }
 
-    public async Task<bool?> GetListHideCompletedAsync(int userId, int listId, CancellationToken ct = default)
-    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("select hide_completed from user_list_prefs where user_id=@u and list_id=@l", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); var res = await cmd.ExecuteScalarAsync(ct); return res is bool b ? b : null; }
-
-    public async Task SetListHideCompletedAsync(int userId, int listId, bool hideCompleted, CancellationToken ct = default)
-    { await EnsureSchemaAsync(ct); await using var conn = new NpgsqlConnection(_connectionString); await conn.OpenAsync(ct); await using var cmd = new NpgsqlCommand("insert into user_list_prefs(user_id,list_id,hide_completed,updated_at) values(@u,@l,@h,now()) on conflict(user_id,list_id) do update set hide_completed=excluded.hide_completed, updated_at=now()", conn); cmd.Parameters.AddWithValue("u", userId); cmd.Parameters.AddWithValue("l", listId); cmd.Parameters.AddWithValue("h", hideCompleted); await cmd.ExecuteNonQueryAsync(ct); }
-
-    // === Security & Utility Helpers (restored) ===
     private static byte[] GenerateSalt(int size)
     { var salt = new byte[size]; RandomNumberGenerator.Fill(salt); return salt; }
 
