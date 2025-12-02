@@ -73,6 +73,11 @@ public class ManageListsPage : ContentPage, IQueryAttributable
     private Grid _busyOverlay; // full-screen loading overlay
     private ActivityIndicator _busySpinner; private Label _busyLabel; private int _busyDepth;
 
+    // New: edit Daily toggle for selected owned list
+    private Switch _editDailySwitch = null!;
+    private HorizontalStackLayout _editDailyRow = null!;
+    private bool _suppressDailyToggleEvent;
+
     public ManageListsPage() : this(ServiceHelper.GetRequiredService<INeonDbService>()) { }
     public ManageListsPage(INeonDbService db)
     {
@@ -181,6 +186,20 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         _deleteButton = new Button { Text = "Delete Selected", Style = (Style)Application.Current!.Resources["OutlinedButton"], TextColor = Colors.Red };
         _deleteButton.Clicked += async (_, __) => await DeleteSelectedAsync();
 
+        // New: owner-only Daily toggle for the selected list
+        _editDailySwitch = new Switch { IsEnabled = false };
+        _editDailySwitch.Toggled += async (_, e) =>
+        {
+            if (_suppressDailyToggleEvent) return;
+            await OnEditDailyToggledAsync(e.Value);
+        };
+        _editDailyRow = new HorizontalStackLayout
+        {
+            Spacing = 8,
+            IsVisible = false,
+            Children = { new Label { Text = "Daily" }, _editDailySwitch }
+        };
+
         var redeemRow = new HorizontalStackLayout { Spacing = 8, Children = { _shareCodeEntry, _redeemButton } };
         var actionsRow = new HorizontalStackLayout { Spacing = 12, Children = { _newListToggleButton, _deleteButton } };
 
@@ -200,6 +219,7 @@ public class ManageListsPage : ContentPage, IQueryAttributable
                     _sharedEmptyLabel,
                     _sharedListsView,
                     _selectionStatusLabel,
+                    _editDailyRow,
                     actionsRow,
                     new Label { Text = "Redeem Code", FontAttributes = FontAttributes.Bold },
                     redeemRow
@@ -660,6 +680,25 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         { var lr = _ownedLists.FirstOrDefault(o => o.Id == _selectedListId); _selectionStatusLabel.Text = lr != null ? $"Selected (Owned): {lr.Name}" : "No list selected"; }
         else
         { var sl = _sharedLists.FirstOrDefault(o => o.Id == _selectedListId); _selectionStatusLabel.Text = sl != null ? $"Selected (Shared): {sl.Name}" : "No list selected"; }
+
+        // Sync Daily toggle visibility and state
+        bool ownedSelected = _selectedListId != null && !_selectedIsShared && _ownedLists.Any(o => o.Id == _selectedListId);
+        _editDailyRow.IsVisible = ownedSelected;
+        if (ownedSelected)
+        {
+            var lr = _ownedLists.FirstOrDefault(o => o.Id == _selectedListId);
+            _suppressDailyToggleEvent = true;
+            _editDailySwitch.IsToggled = lr?.IsDaily ?? false;
+            _editDailySwitch.IsEnabled = true;
+            _suppressDailyToggleEvent = false;
+        }
+        else
+        {
+            _suppressDailyToggleEvent = true;
+            _editDailySwitch.IsToggled = false;
+            _suppressDailyToggleEvent = false;
+            _editDailySwitch.IsEnabled = false;
+        }
     }
 
     private void ApplyVisual(Border b)
@@ -816,5 +855,32 @@ public class ManageListsPage : ContentPage, IQueryAttributable
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try { await work(); }
         finally { sw.Stop(); HideBusy(); }
+    }
+
+    private async Task OnEditDailyToggledAsync(bool value)
+    {
+        if (_selectedListId == null || _selectedIsShared) return;
+        var listId = _selectedListId.Value;
+        bool ok = false;
+        try { ok = await _db.SetListDailyAsync(listId, value); } catch { ok = false; }
+        if (!ok)
+        {
+            _suppressDailyToggleEvent = true;
+            _editDailySwitch.IsToggled = !value;
+            _suppressDailyToggleEvent = false;
+            try { await DisplayAlert("Update Failed", "Could not update Daily setting.", "OK"); } catch { }
+            return;
+        }
+        // Optimistic update of owned lists collection so the "Daily" pill updates immediately
+        int idx = -1;
+        for (int i = 0; i < _ownedListsObs.Count; i++)
+        {
+            if (_ownedListsObs[i].Id == listId) { idx = i; break; }
+        }
+        if (idx >= 0)
+        {
+            var cur = _ownedListsObs[idx];
+            _ownedListsObs[idx] = new ListRecord(cur.Id, cur.Name, value);
+        }
     }
 }
