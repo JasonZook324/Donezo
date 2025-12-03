@@ -22,6 +22,36 @@ public partial class DashboardPage
     private static readonly BindableProperty ItemVmTrackerProperty = BindableProperty.CreateAttached(
         "ItemVmTracker", typeof(ItemVm), typeof(DashboardPage), null);
 
+    // Bulk add overlay fields
+    private Grid _bulkOverlay = null!;
+    private Border _bulkModal = null!;
+    private Editor _bulkEditor = null!;
+    private Button _bulkConfirmButton = null!;
+    private Button _bulkCancelButton = null!;
+    private Button _openBulkAddButton = null!;
+
+    // Preference key for last-selected list (username-scoped when available)
+    private string LastListPrefKey => string.IsNullOrWhiteSpace(_username) ? "DONEZO_LAST_LIST_ID" : $"DONEZO_LAST_LIST_ID::{_username}";
+
+    private async Task TryRestoreLastSelectedListAsync()
+    {
+        try
+        {
+            int last = Preferences.Get(LastListPrefKey, 0);
+            if (last > 0 && (_selectedListId == null || _selectedListId.Value != last))
+            {
+                _selectedListId = last;
+                await RefreshItemsAsync(userInitiated: true);
+            }
+        }
+        catch { }
+    }
+
+    private void SaveLastSelectedList()
+    {
+        try { if (_selectedListId != null && _selectedListId.Value > 0) Preferences.Set(LastListPrefKey, _selectedListId.Value); } catch { }
+    }
+
     private void OnItemVmPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (sender is not ItemVm vm) return;
@@ -221,11 +251,15 @@ public partial class DashboardPage
         // Action button: wide new item
         _openNewItemButton = new Button { Text = "+ New Item", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 20, Padding = new Thickness(18,10), HorizontalOptions = LayoutOptions.Fill, CornerRadius = 18 };
         _openNewItemButton.Clicked += (_,__) => ShowNewItemOverlay();
+        // Bulk add button
+        _openBulkAddButton = new Button { Text = "Bulk Add", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 16, Padding = new Thickness(16,8), HorizontalOptions = LayoutOptions.Center, CornerRadius = 18 };
+        _openBulkAddButton.Clicked += (_,__) => ShowBulkAddOverlay();
         _resetListButton = new Button { Text = "Reset List", Style = (Style)Application.Current!.Resources["OutlinedButton"], FontSize = 16, Padding = new Thickness(16,8), HorizontalOptions = LayoutOptions.Center, CornerRadius = 18, IsEnabled = CanResetList() };
         _resetListButton.Clicked += (_,__) => Device.BeginInvokeOnMainThread(async ()=> await ResetEntireListAsync());
-        var newButtonRow = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto) } };
+        var newButtonRow = new Grid { ColumnDefinitions = new ColumnDefinitionCollection { new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto), new ColumnDefinition(GridLength.Auto) } };
         newButtonRow.Add(_openNewItemButton,0,0);
-        newButtonRow.Add(_resetListButton,1,0);
+        newButtonRow.Add(_openBulkAddButton,1,0);
+        newButtonRow.Add(_resetListButton,2,0);
 
         // Filter row (keep simple toggle)
         _hideCompletedSwitch = new Switch { IsToggled=_hideCompleted };
@@ -240,11 +274,125 @@ public partial class DashboardPage
         stack.Children.Add(_emptyFilteredLabel);
         stack.Children.Add(_itemsView);
 
+        // Build bulk overlay and add to stack as last child (overlays content)
+        _bulkOverlay = new Grid { IsVisible = false, BackgroundColor = Colors.Black.WithAlpha(0.45f) };
+        _bulkModal = BuildBulkAddModal();
+        var overlayHost = new Grid { VerticalOptions = LayoutOptions.Fill, HorizontalOptions = LayoutOptions.Fill };
+        overlayHost.Children.Add(new Grid { VerticalOptions = LayoutOptions.Center, HorizontalOptions = LayoutOptions.Center, Children = { _bulkModal } });
+        var backdropTap = new TapGestureRecognizer(); backdropTap.Tapped += (_, __) => HideBulkAddOverlay();
+        _bulkOverlay.GestureRecognizers.Add(backdropTap);
+        _bulkOverlay.Children.Add(overlayHost);
+        stack.Children.Add(_bulkOverlay);
+
         var card = new Border { StrokeThickness = 1, StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(16) }, Padding = new Thickness(6,0,4,0), Content = stack };
         card.Style = (Style)Application.Current!.Resources["CardBorder"]; 
         // Initialize ring visuals now
         UpdateStats();
         return card;
+    }
+
+    private Border BuildBulkAddModal()
+    {
+        _bulkEditor = new Editor { Placeholder = "Enter item names (one per line)", AutoSize = EditorAutoSizeOption.TextChanges, HeightRequest = 220, Keyboard = Keyboard.Text };
+        _bulkConfirmButton = new Button { Text = "Add Items", Style = (Style)Application.Current!.Resources["PrimaryButton"] };
+        _bulkCancelButton = new Button { Text = "Cancel", Style = (Style)Application.Current!.Resources["OutlinedButton"] };
+        _bulkConfirmButton.Clicked += async (_, __) => await BulkAddItemsAsync();
+        _bulkCancelButton.Clicked += (_, __) => HideBulkAddOverlay(clear: true);
+        var modal = new Border
+        {
+            StrokeThickness = 1,
+            StrokeShape = new RoundRectangle { CornerRadius = new CornerRadius(24) },
+            Padding = new Thickness(24, 24),
+            BackgroundColor = (Color)Application.Current!.Resources[Application.Current!.RequestedTheme == AppTheme.Dark ? "OffBlack" : "White"],
+            Content = new VerticalStackLayout
+            {
+                Spacing = 12,
+                WidthRequest = 520,
+                Children =
+                {
+                    new Label { Text = "Bulk Add Items", FontAttributes = FontAttributes.Bold, FontSize = 20, HorizontalTextAlignment = TextAlignment.Center },
+                    _bulkEditor,
+                    new HorizontalStackLayout { Spacing = 10, HorizontalOptions = LayoutOptions.Center, Children = { _bulkConfirmButton, _bulkCancelButton } }
+                }
+            }
+        };
+        if (Application.Current!.Resources.TryGetValue("CardBorder", out var styleObj) && styleObj is Style style) modal.Style = style;
+        return modal;
+    }
+
+    private void ShowBulkAddOverlay()
+    {
+        if (_selectedListId == null) { _ = DisplayAlert("Bulk Add", "Select a list first.", "OK"); return; }
+        _bulkOverlay.IsVisible = true;
+        _bulkModal.Opacity = 0; _bulkModal.Scale = 0.92;
+        _ = _bulkModal.FadeTo(1, 160, Easing.CubicOut);
+        _ = _bulkModal.ScaleTo(1, 160, Easing.CubicOut);
+        Device.BeginInvokeOnMainThread(() => _bulkEditor.Focus());
+    }
+
+    private void HideBulkAddOverlay(bool clear = false)
+    {
+        if (clear) { _bulkEditor.Text = string.Empty; }
+        if (!_bulkOverlay.IsVisible) return;
+        _ = _bulkModal.FadeTo(0, 120, Easing.CubicOut);
+        _ = _bulkModal.ScaleTo(0.94, 120, Easing.CubicOut);
+        Device.StartTimer(TimeSpan.FromMilliseconds(130), () => { _bulkOverlay.IsVisible = false; return false; });
+    }
+
+    private async Task BulkAddItemsAsync()
+    {
+        var listId = _selectedListId; if (listId == null) return;
+        var raw = _bulkEditor.Text ?? string.Empty;
+        var names = raw.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.RemoveEmptyEntries)
+                       .Select(s => s.Trim())
+                       .Where(s => !string.IsNullOrWhiteSpace(s))
+                       .ToList();
+        if (names.Count == 0) { HideBulkAddOverlay(clear: true); return; }
+        var newIds = new List<int>();
+        try
+        {
+            // Create all items
+            foreach (var name in names)
+            {
+                int newId = await _db.AddItemAsync(listId.Value, name);
+                newIds.Add(newId);
+            }
+            // Compute top insertion orders for new roots only using a single expected revision
+            long expectedRevision = await _db.GetListRevisionAsync(listId.Value);
+            // Get current items to find min order among existing roots
+            IReadOnlyList<ItemRecord> current = Array.Empty<ItemRecord>();
+            try { current = await _db.GetItemsAsync(listId.Value); } catch { current = Array.Empty<ItemRecord>(); }
+            int baseMin = current.Where(r => r.ParentItemId == null && !newIds.Contains(r.Id)).DefaultIfEmpty().Min(r => r?.Order ?? 0);
+            int expectedOrder = baseMin - 1;
+            for (int i = 0; i < newIds.Count; i++)
+            {
+                int id = newIds[i];
+                int newOrder = expectedOrder - i;
+                try
+                {
+                    var res = await _db.SetItemOrderAsync(id, newOrder, expectedRevision);
+                    if (res.Ok)
+                    {
+                        expectedRevision = res.NewRevision;
+                        _lastRevision = res.NewRevision;
+                    }
+                }
+                catch { }
+            }
+            // Single authoritative refresh to avoid duplicate VMs
+            await RefreshItemsAsync(true);
+            UpdateCompletedSummary();
+            _recentLocalMutationUtc = DateTime.UtcNow;
+            _skipAutoRefreshUntil = DateTime.UtcNow.AddSeconds(5);
+        }
+        catch
+        {
+            await RefreshItemsAsync(true);
+        }
+        finally
+        {
+            HideBulkAddOverlay(clear: true);
+        }
     }
 
     // Safe theme color lookup with fallbacks to avoid KeyNotFoundException
@@ -683,6 +831,8 @@ public partial class DashboardPage
                 var leftItems = new SwipeItems { Mode = SwipeMode.Execute };
                 leftItems.Add(completionSwipeItem);
                 var swipe = new SwipeView { Content = card, LeftItems = leftItems };
+                var swipeIndentBinding = new Binding("Level") { Converter = new LevelBorderGapConverter() };
+                swipe.SetBinding(View.MarginProperty, swipeIndentBinding);
 
                 var spacer = new BoxView { HeightRequest = 10, Opacity = 0, BackgroundColor = Colors.Transparent };
                 var spacerDrop = new DropGestureRecognizer { AllowDrop = true };
@@ -772,6 +922,29 @@ public class CompletionSwipeTextConverter : IValueConverter
         return value is bool b && b ? "Undo" : "Complete";
     }
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => null!;
+}
+
+// Indentation converters for card and name based on item level
+public class LevelIndentConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        int level = value is int i ? i : 0;
+        double indent = level switch { <=1 => 0, 2 => 20, 3 => 40, _ => 60 };
+        return new Thickness(indent, 0, 0, 0);
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => 0;
+}
+public class LevelBorderGapConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        int level = value is int i ? i : 0;
+        // Add left margin to the card itself so the whole card is indented, consistent across platforms (Android/iOS/Windows)
+        double indent = level switch { <=1 => 0, 2 => 16, 3 => 32, _ => 48 };
+        return new Thickness(indent, 6, 6, 6);
+    }
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => 0;
 }
 
     // Incremental expand: insert visible descendants after parent without rebuilding whole list
@@ -1017,6 +1190,8 @@ public class CompletionSwipeTextConverter : IValueConverter
             await LoadHideCompletedPreferenceForSelectedListAsync();
             RebuildVisibleItems(); UpdateCompletedSummary();
             try { _lastRevision = await _db.GetListRevisionAsync(_selectedListId.Value); } catch { }
+            // Persist last selected list for restore on next load
+            SaveLastSelectedList();
         }
         finally { _isRefreshing=false; _suppressListRevisionCheck=false; }
     }

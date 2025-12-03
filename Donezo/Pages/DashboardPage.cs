@@ -562,6 +562,18 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
             var shared = await _db.GetSharedListsAsync(_userId.Value);
             _ownedLists = actuallyOwned; _sharedLists = shared;
             var combined = new List<object>(); combined.AddRange(actuallyOwned); combined.AddRange(shared);
+
+            // Prefer previously saved selection if none is set yet
+            if (_selectedListId == null)
+            {
+                try
+                {
+                    int last = Preferences.Get(LastListPrefKey, 0);
+                    if (last > 0) _selectedListId = last;
+                }
+                catch { }
+            }
+
             _listPicker.ItemsSource = combined;
             if (_selectedListId != null)
             {
@@ -688,9 +700,7 @@ public partial class DashboardPage : ContentPage, IQueryAttributable
         catch { }
     }
     protected override void OnAppearing()
-    { base.OnAppearing(); if (_selectedListId != null) StartRevisionPolling(); }
-    protected override void OnDisappearing()
-    { base.OnDisappearing(); StopRevisionPolling(); }
+    { base.OnAppearing(); }
 
     private void ApplyItemCardStyle(Border b, ItemVm vm)
     {
