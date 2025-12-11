@@ -66,10 +66,24 @@
 	</ItemGroup>
 
 	<ItemGroup>
+	  <None Include="Donezo.Tests\Donezo.Tests.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="9.0.5" />
 		<PackageReference Include="Microsoft.Extensions.Http" Version="9.0.0" />
 		<PackageReference Include="Npgsql" Version="8.0.3" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Folder Include="Donezo.Tests\Pages\" />
+	</ItemGroup>
+
+	<!-- Exclude test code files from the MAUI app build -->
+	<ItemGroup>
+		<Compile Remove="Donezo.Tests\**\*.cs" />
+		<None Include="Donezo.Tests\**\*.cs" />
 	</ItemGroup>
 
 </Project>
