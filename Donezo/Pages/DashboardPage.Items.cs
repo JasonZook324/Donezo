@@ -225,7 +225,7 @@ public partial class DashboardPage
         {
             WidthRequest = ringSize,
             HeightRequest = ringSize,
-            Stroke = new SolidColorBrush((Color)Application.Current!.Resources[Application.Current!.RequestedTheme==AppTheme.Dark?"Gray700":"Gray200"]),
+            Stroke = new SolidColorBrush((Color)Application.Current!.Resources[Application.Current!.RequestedTheme==AppTheme.Dark?"Gray600":"Gray200"]),
             StrokeThickness = 14,
             Fill = Colors.Transparent
         };
